@@ -1,8 +1,4 @@
-Here is the fully expanded `README.md` for **SENTINEL-WEAR**. It integrates the "Body-Frame Drift Correction," the "Extreme Velocity Sensing" feasibility research, and the architectural innovations regarding distributed sensor fusion, while strictly maintaining all original content and legal disclaimers.
-
----
-
-# 3. SENTINEL-WEAR — Wearable Distributed Sensing for Personal Awareness (Research Framework)
+# SENTINEL-WEAR — Wearable Distributed Sensing for Personal Awareness (Research Framework)
 
 **An open research framework for wearable, jewelry-form-factor distributed sensors that build a 360° body-coordinate awareness field around the wearer.**
 
