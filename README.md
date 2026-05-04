@@ -2,7 +2,8 @@
 
 **An open research framework for wearable, jewelry-form-factor distributed sensors that build a 360° body-coordinate awareness field around the wearer.**
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](#license)
+[![License: MIT](https://img.shields.io/badge/Code-MIT-blue.svg)](#license)
+[![License: CERN OHL](https://img.shields.io/badge/Hardware-CERN%20OHL--S%20v2-green.svg)](#license)
 [![Status: Research](https://img.shields.io/badge/Status-Research%20Only-red.svg)](#scope-and-disclaimers)
 [![Sensing-Only](https://img.shields.io/badge/Effectors-Out%20of%20Scope-orange.svg)](#scope-and-disclaimers)
 
@@ -10,7 +11,7 @@
 
 ## Scope and Disclaimers
 
-SENTINEL-WEAR is a **research and education** project that studies the architecture and feasibility of wearable distributed sensing in jewelry form factors — necklaces, bracelets, anklets, belt-pieces, eyewear — that together build a body-frame awareness field around the wearer. The project is motivated by the observation that personal protective adornments (literal or symbolic) are present in nearly every culture in human history, and that with modern miniaturized sensors, the *sensing* dimension of personal protection is now genuinely feasible in those form factors.
+SENTINEL-WEAR is a **research and education** project that studies the architecture and feasibility of wearable distributed sensing in jewelry form factors — necklaces, bracelets, anklets, belt-pieces, eyewear — that together build a body-frame awareness field around the wearer. The project is motivated by the observation that personal protective adornments (literal or symbolic) are present across nearly every culture in human history, and that with modern miniaturized sensors, the *sensing* dimension of personal protection is now genuinely feasible in those form factors.
 
 **Strictly limited to:**
 
@@ -19,7 +20,7 @@ SENTINEL-WEAR is a **research and education** project that studies the architect
 - Tracking and threat-classification algorithms (using PentaTrack).
 - Alerting, haptic, and information-display research.
 - Form-factor and human-factors research (comfort, weight, battery, charging, durability, water resistance).
-- **Opt-in Visual Identification:** Low-resolution camera integration for specific nodes (e.g., Necklace) used strictly for object/face classification, not for primary motion tracking.
+- **Opt-in Visual Identification:** Camera integration for specific nodes (e.g., Necklace) used strictly for object/face classification, not for primary motion tracking.
 - **Feasibility Research:** Theoretical analysis of detection latency for high-velocity objects and survey of adjacent materials science domains.
 
 **Explicitly out of scope:**
@@ -94,7 +95,7 @@ Each node carries some subset of:
 - **Short-range LiDAR / ToF** — close-range geometry where radar resolution is insufficient.
 - **Environmental sensors** — temperature, gas, air quality.
 - **Haptic actuator** — silent directional alerts to the wearer.
-- **Low-resolution Camera (Optional/Opt-in)** — **Identification Layer.** Not used for tracking movement. Used strictly to classify detected objects (e.g., "Person known: John" or "Object held: Knife" vs "Stick"). This module is typically located in the **Necklace/Pendant Node** due to its wider, stable field of view (POV) and is physically or logically disabled by default to ensure privacy.
+- **Visual Identification Module (Optional/Opt-in)** — **Identification Layer.** Not used for tracking movement. Used strictly to classify detected objects (e.g., "Person known: John" or "Object held: Knife" vs "Stick"). This module is typically located in the **Necklace/Pendant Node** due to its wider, stable field of view (POV) and is physically or logically disabled by default to ensure privacy.
 
 The **belt node** is the primary compute and battery — easiest to make heavier without compromising comfort. Other nodes are slim and beam metadata to the belt over a low-power body-area-network radio.
 
