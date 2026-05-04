@@ -1,7 +1,3 @@
-Here is the fully updated, corrected, and expanded `README.md` for **SENTINEL-WEAR**. This version integrates the **Camera Identification Layer** as an opt-in, privacy-centric feature distinct from the primary sensing mesh, ensuring no omissions from previous iterations.
-
----
-
 # SENTINEL-WEAR — Wearable Distributed Sensing for Personal Awareness (Research Framework)
 
 **An open research framework for wearable, jewelry-form-factor distributed sensors that build a 360° body-coordinate awareness field around the wearer.**
@@ -131,10 +127,25 @@ The track produces a specification for the only viable sensor fusion stack:
 - **Doppler Radar:** Continuous Wave (CW) radar has zero scanning latency and detects velocity shifts instantaneously.
 - **Event-Based Vision:** Neuromorphic cameras react in microseconds, capturing the trajectory without the bandwidth overhead of standard video.
 
-This research documents the **Reaction Time Budget**: for a 3-meter engagement radar-style display.
--   **Identification Tags (Opt-in).** If the optional Visual Identification Layer (Necklace Node) is enabled, the system attaches classification tags to tracked objects (e.g., "Known Contact: Sarah" or "Object: Knife"). This allows the wearer to distinguish between a known friend approaching and an unknown entity without needing to turn around.
--   **Logging** for personal review.
--   **Optional emergency contact** — manually triggered, never automatic — that sends a position to a designated contact.
+This research documents the **Reaction Time Budget**: for a 3-meter engagement distance, the system has between **2.5ms (rifle) and 8.5ms (handgun)** to detect and process the threat.
+
+### Out of Scope
+This document characterizes detection. It does not address what the system should *do* when a fast object is detected, beyond the standard alert modalities. Downstream actuation questions are mapped in `docs/theory/future_research.md` and `docs/theory/passive_materials_research.md` as adjacent research domains but are not implemented in this repository.
+
+See `docs/theory/extreme_velocity_sensing.md` for the full document.
+
+---
+
+## Output Modalities (Strictly Informational)
+
+What SENTINEL-WEAR *does* with what it perceives:
+
+- **Haptic alerts.** Directional buzz on the appropriate node — "approach from your right rear" buzzes the right-rear-most node.
+- **Audio alerts** (bone conduction or earpiece, optional).
+- **Companion-app overlay** on phone or smartwatch showing the body-frame field as an abstract radar-style display.
+- **Identification Output (Opt-in).** If the Identification Layer is active, classification tags (e.g., "Known Contact," "Unknown Person," "Weapon Detected") are appended to the alert stream. No persistent video is stored; only the classification label.
+- **Logging** for personal review.
+- **Optional emergency contact** — manually triggered, never automatic — that sends a position to a designated contact.
 
 What SENTINEL-WEAR explicitly does *not* do: trigger any physical mechanism, deploy any object, release any substance, or take any kinetic action of any kind.
 
@@ -161,7 +172,7 @@ sentinel-wear/
 │   └── assets/
 ├── hardware/
 │   ├── schematic/
-│   │   ├── pendant_node/        # Includes optional camera module
+│   │   ├── pendant_node/
 │   │   ├── bracelet_node/
 │   │   ├── belt_node/
 │   │   ├── anklet_node/
@@ -217,12 +228,12 @@ sentinel-wear/
 
 ## Roadmap
 
--   **Phase 1.** Belt-node-only bench prototype — full sensor stack, body-frame fusion of one node, IMU-driven drift correction.
--   **Phase 2.** Add bracelet + pendant — demonstrate multi-node body-frame fusion and cross-node drift correction.
--   **Phase 3.** Full mesh of all six nodes with BAN protocol. Integration of optional **Visual Identification Layer** on Necklace node (opt-in).
--   **Phase 4.** Comfort, durability, weight, water resistance, hypoallergenic-material, and human-factors study.
--   **Phase 5.** Public open-data release of body-frame trajectory dataset for the research community.
--   **Parallel Track (sensing physics).** Reaction-time-budget analysis and sensor-architecture characterization for fast-moving-object detection at body-frame engagement distances.
+- **Phase 1.** Belt-node-only bench prototype — full sensor stack, body-frame fusion of one node, IMU-driven drift correction.
+- **Phase 2.** Add bracelet + pendant — demonstrate multi-node body-frame fusion and cross-node drift correction.
+- **Phase 3.** Full mesh of all six nodes with BAN protocol. Integration of Visual Identification Layer (Necklace node) for object classification.
+- **Phase 4.** Comfort, durability, weight, water resistance, hypoallergenic-material, and human-factors study.
+- **Phase 5.** Public open-data release of body-frame trajectory dataset for the research community.
+- **Parallel Track (sensing physics).** Reaction-time-budget analysis and sensor-architecture characterization for fast-moving-object detection at body-frame engagement distances.
 
 There is no Phase N for actuation. By design.
 
