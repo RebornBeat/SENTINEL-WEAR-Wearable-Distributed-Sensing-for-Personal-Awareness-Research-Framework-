@@ -19,7 +19,7 @@ SENTINEL-WEAR is a **research and education** project that studies the architect
 - Tracking and threat-classification algorithms (using PentaTrack).
 - Alerting, haptic, and information-display research.
 - Form-factor and human-factors research (comfort, weight, battery, charging, durability, water resistance).
-- **Feasibility Research:** Theoretical analysis of detection latency for high-velocity objects (see `docs/theory/extreme_velocity_sensing.md`).
+- **Feasibility Research:** Theoretical analysis of detection latency for high-velocity objects and survey of adjacent materials science domains.
 
 **Explicitly out of scope:**
 
@@ -30,22 +30,29 @@ SENTINEL-WEAR is a **research and education** project that studies the architect
 
 The reasoning is straightforward: physical interception at body scale is (a) currently dominated by passive armor, which is mature and well-served by existing products; (b) a regulated category in nearly every jurisdiction; and (c) genuinely dangerous to research informally. SENTINEL-WEAR's contribution is upstream of any actuation: *if you cannot perceive a threat, no effector matters.* If perception is solved well in a wearable form factor, downstream actuation becomes a regulated engineering problem for qualified parties — outside this repository.
 
+See `docs/theory/future_research.md` for the full research-domain map across all tiers, and `legal/research_ethics.md` for the project's ethics posture.
+
 ---
 
 ## Innovation Landscape
 
-Existing patents in the wearable space typically cover single-node sensing (wrist-based heart rate) or simple gesture recognition. SENTINEL-WEAR innovates by treating the body not as a point, but as a **volume**.
+The wearable sensing market is dominated by single-node devices (smartwatches, fitness trackers) that treat the body as a point and answer questions about that point — heart rate at the wrist, steps via wrist accelerometer, sleep via wrist motion. SENTINEL-WEAR sits in an under-published research space: distributed sensing across multiple body-worn nodes that together treat the body as a *volume* with surrounding context.
 
-**Key Architectural Innovations:**
-1.  **Distributed Body-Frame Fusion:** Unlike a smartwatch that tracks the wrist, SENTINEL-WEAR fuses data from neck, wrists, and ankles to maintain a stable "torso-relative" coordinate system.
-2.  **Body-Frame Drift Correction:** A critical algorithm that separates the wearer's motion (turning, walking) from the world's motion. This ensures that a "threat approaching" alert is real, and not an artifact of the wearer simply turning their body.
-3.  **Body-Area Phased Array:** By synchronizing mmWave radar nodes across the body, the system can conceptually operate as a distributed aperture, improving angular resolution beyond what a single jewelry-sized sensor can achieve.
+**Architectural focus areas:**
+
+1.  **Distributed Body-Frame Fusion.** Multiple nodes (neck, wrists, waist, ankles, optionally eyewear) cooperate to maintain a unified body-frame coordinate system. Each node's local detections are transformed into the shared frame and fused. Published research on multi-IMU body-pose estimation provides the technical substrate; the application to jewelry-form-factor distributed perception is the open research question this project addresses.
+
+2.  **Body-Frame Drift Correction.** The wearer is in motion — walking, turning, gesturing. A naive perception system reports the world rotating when the wearer turns. Body-frame drift correction uses the multi-IMU stack to subtract wearer motion from sensor observations, so a "threat approaching from behind" alert reflects an actual approach and not an artifact of the wearer turning around. See `docs/theory/body_coordinate_fusion.md`.
+
+3.  **Sensing-Physics Research at Body-Frame Timescales.** A separate research track studies the physics constraints of detecting fast-moving objects within body-frame engagement distances. This is upstream-of-actuation work — characterizing what sensor architectures *can* and *cannot* detect at the relevant timescales — and is the substrate for any future research by qualified parties on the downstream questions. See `docs/theory/extreme_velocity_sensing.md`.
+
+These are research focuses, not patent claims. The repository is MIT-licensed and the maintainers do not pursue patent filings on the architecture.
 
 ---
 
 ## What the Project Actually Builds
 
-A **distributed wearable sensor mesh** worn on the body that continuously maintains a body-frame 3D awareness field. The wearer becomes the origin of their own coordinate system; sensors at multiple body locations (neck, wrists, waist, ankles, optionally eyewear) cover overlapping hemispheres around the body.
+A **distributed wearable sensor mesh** worn on the body that continuously maintains a body-frame 3D awareness field. The wearer becomes the origin of their own coordinate system; sensors at multiple body locations cover overlapping hemispheres around the body.
 
 ```
                        ┌───────────────┐
@@ -78,12 +85,12 @@ A **distributed wearable sensor mesh** worn on the body that continuously mainta
 
 Each node carries some subset of:
 
-- **mmWave Radar:** Presence/motion of objects approaching the body envelope. Selected for its ability to function in darkness and through obscuration (fog/smoke).
-- **IMU (Inertial Measurement Unit):** Critical for determining the orientation of the node relative to the body frame.
-- **Microphone Array:** Acoustic localization — direction-of-arrival of sudden sounds (glass break, verbal aggression).
-- **Short-range LiDAR / ToF:** Close-range geometry where radar resolution is insufficient.
-- **Environmental Sensors:** Temperature, gas, air quality.
-- **Haptic Actuator:** Silent directional alerts to the wearer.
+- **mmWave radar** — presence/motion of objects approaching the body envelope; functions in darkness, through obscuration, and in adverse weather.
+- **IMU** — orientation of that node in the body frame; the substrate for body-frame drift correction.
+- **Microphone array** — acoustic localization, direction-of-arrival of sudden sounds (glass break, verbal aggression, vehicle approach).
+- **Short-range LiDAR / ToF** — close-range geometry where radar resolution is insufficient.
+- **Environmental sensors** — temperature, gas, air quality.
+- **Haptic actuator** — silent directional alerts to the wearer.
 
 The **belt node** is the primary compute and battery — easiest to make heavier without compromising comfort. Other nodes are slim and beam metadata to the belt over a low-power body-area-network radio.
 
@@ -91,14 +98,12 @@ The **belt node** is the primary compute and battery — easiest to make heavier
 
 ## Body-Frame Tracking with PentaTrack
 
-The fusion engine uses [PentaTrack](https://github.com/RebornBeat/PentaTrack) but with the coordinate origin attached to the wearer's *torso*, not the world. Every node's IMU continuously reports its orientation; the fusion layer transforms each node's local detections into a unified body-frame.
+The fusion engine uses [PentaTrack](https://github.com/RebornBeat/PentaTrack) but with the coordinate origin attached to the wearer's *torso*, not the world. Every node's IMU continuously reports its orientation; the fusion layer transforms each node's local detections into a unified body-frame, applies drift correction to subtract wearer motion, and produces a tracked field of objects in body coordinates:
 
-This produces a tracked field of objects in body coordinates:
-
-- *"Person approaching from behind, 4 m, closing at 1.5 m/s."*
-- *"Vehicle 8 m to the left, parallel motion, 30 km/h."*
-- *"Sudden acoustic event 2 m forward-up, glass-break signature, 0.91 confidence."*
-- *"Wearer gait deviation: 60% probability of stumble in the next 800 ms."*
+- "Person approaching from behind, 4 m, closing at 1.5 m/s."
+- "Vehicle 8 m to the left, parallel motion, 30 km/h."
+- "Sudden acoustic event 2 m forward-up, glass-break signature, 0.91 confidence."
+- "Wearer gait deviation: 60% probability of stumble in the next 800 ms."
 
 PentaTrack's object-type awareness, drift profiles, and anomaly detection are repurposed: the "object types" become "human walking," "human running," "vehicle," "animal," "thrown object" — each with drift profiles tuned for that class's plausible motion in body-frame coordinates.
 
@@ -106,18 +111,24 @@ PentaTrack's object-type awareness, drift profiles, and anomaly detection are re
 
 ## Research Domain: Extreme Velocity Sensing
 
-A specific track of this project researches the feasibility of detecting high-velocity projectiles (ballistics) using wearable sensors. This is purely theoretical research to define the "Reaction Time Budget."
+A specific research track of this project studies the physics of detecting high-velocity objects at body-frame engagement distances. This is sensing-physics research — characterizing reaction-time budgets, the failure modes of standard sensor modalities at relevant timescales, and the architecture of sensor stacks that can operate within those budgets.
 
-**The Physics Problem:**
+### The Physics Problem
 Standard sensing technologies fail at ballistic speeds.
-*   **LiDAR:** Too slow (scanning latency creates blind spots between scans).
-*   **Acoustic:** Too slow (sound travels slower than bullets; the bullet hits before the sound arrives).
+*   **LiDAR:** Too slow. Scanning latency creates blind spots between scans. A bullet moves 40+ meters between typical LiDAR scans.
+*   **Acoustic:** Too slow. Sound travels at ~343 m/s. A supersonic bullet arrives *before* the sound of the muzzle blast. Acoustic sensing is forensic, not preventive.
 
-**The Proposed Solution (Research Subject):**
-*   **Doppler Radar:** Continuous Wave (CW) radar has zero scanning latency and detects velocity shifts instantaneously.
-*   **Event-Based Vision:** Neuromorphic cameras react in microseconds, capturing the trajectory without the bandwidth overhead of standard video.
+### The Proposed Sensor Architecture
+The track produces a specification for the only viable sensor fusion stack:
+- **Doppler Radar:** Continuous Wave (CW) radar has zero scanning latency and detects velocity shifts instantaneously.
+- **Event-Based Vision:** Neuromorphic cameras react in microseconds, capturing the trajectory without the bandwidth overhead of standard video.
 
-This research documents the latency budget required to detect a projectile at 800 m/s within a 3-meter engagement zone. It serves as the foundational analysis for any future "upstream" signal that could theoretically trigger a passive defense (e.g., rapid fiber stiffening).
+This research documents the **Reaction Time Budget**: for a 3-meter engagement distance, the system has between **2.5ms (rifle) and 8.5ms (handgun)** to detect and process the threat.
+
+### Out of Scope
+This document characterizes detection. It does not address what the system should *do* when a fast object is detected, beyond the standard alert modalities. Downstream actuation questions are mapped in `docs/theory/future_research.md` and `docs/theory/passive_materials_research.md` as adjacent research domains but are not implemented in this repository.
+
+See `docs/theory/extreme_velocity_sensing.md` for the full document.
 
 ---
 
@@ -145,11 +156,12 @@ sentinel-wear/
 │   │   ├── body_frame_calibration.md
 │   │   └── alert_modalities.md
 │   ├── theory/
+│   │   ├── future_research.md
 │   │   ├── body_coordinate_fusion.md
 │   │   ├── drift_profiles_at_body_scale.md
 │   │   ├── form_factor_human_factors.md
-│   │   ├── extreme_velocity_sensing.md   <-- Ballistic detection feasibility
-│   │   ├── passive_materials_research.md <-- Spider-silk / UHMWPE context
+│   │   ├── extreme_velocity_sensing.md
+│   │   ├── passive_materials_research.md
 │   │   └── why_sensing_only.md
 │   ├── api/
 │   └── assets/
@@ -157,7 +169,7 @@ sentinel-wear/
 │   ├── schematic/
 │   │   ├── pendant_node/
 │   │   ├── bracelet_node/
-│   │   ├── belt_node/           # primary compute
+│   │   ├── belt_node/
 │   │   ├── anklet_node/
 │   │   └── eyewear_node/
 │   ├── gerbers/
@@ -165,35 +177,41 @@ sentinel-wear/
 │   ├── assembly/
 │   ├── datasheets/
 │   ├── testing/
-│   └── hardware_config.md
+│   ├── hardware_config.md
+│   └── README.md
 ├── firmware/
 │   ├── src/
 │   │   ├── drivers/
 │   │   ├── logic/
-│   │   ├── ban_protocol/        # body-area-network radio
+│   │   ├── ban_protocol/
 │   │   └── main.c
 │   ├── bootloader/
 │   ├── tools/
 │   ├── platformio.ini
-│   └── firmware.md
+│   ├── firmware.md
+│   └── README.md
 ├── software/
-│   ├── belt_controller/         # primary fusion + PentaTrack runner
-│   ├── mobile/                  # iOS / Android companion
-│   ├── desktop/                 # config / log review
+│   ├── belt_controller/
+│   ├── mobile/
+│   ├── desktop/
 │   ├── cli/
 │   ├── sdk/
 │   ├── protocol/
-│   │   └── protocol_spec.md     # body-area mesh protocol
-│   └── software.md
+│   │   └── protocol_spec.md
+│   ├── software.md
+│   └── README.md
 ├── mechanical/
-│   ├── cad/                     # jewelry-grade enclosures
+│   ├── cad/
 │   ├── stl/
 │   ├── drawings/
-│   └── mechanical_spec.md       # hypoallergenic materials, water resistance
+│   ├── mechanical_spec.md
+│   └── README.md
 ├── production/
 ├── legal/
-│   ├── compliance.md            # FCC for radios, jewelry-metal regulations
+│   ├── compliance.md
 │   ├── medical_device_disclaimer.md
+│   ├── research_ethics.md
+│   ├── export_control_posture.md
 │   └── tos_compliance.md
 ├── media/
 ├── README.md
@@ -201,24 +219,22 @@ sentinel-wear/
 └── CHANGELOG.md
 ```
 
-The `mechanical/` directory is unusually important for this project — wearable form factor is a research dimension in its own right.
-
 ---
 
 ## Roadmap
 
-- **Phase 1:** Belt-node-only bench prototype — full sensor stack, body-frame fusion of one node.
-- **Phase 2:** Add bracelet + pendant — demonstrate multi-node body-frame fusion and drift correction.
-- **Phase 3:** Full mesh of all six nodes.
-- **Phase 4:** Comfort, durability, weight, and human-factors study.
-- **Phase 5:** Public open-data release of body-frame trajectory dataset for the research community.
-- **Parallel Research Track:** Simulation and latency analysis of extreme-velocity (ballistic) detection feasibility.
+- **Phase 1.** Belt-node-only bench prototype — full sensor stack, body-frame fusion of one node, IMU-driven drift correction.
+- **Phase 2.** Add bracelet + pendant — demonstrate multi-node body-frame fusion and cross-node drift correction.
+- **Phase 3.** Full mesh of all six nodes with BAN protocol.
+- **Phase 4.** Comfort, durability, weight, water resistance, hypoallergenic-material, and human-factors study.
+- **Phase 5.** Public open-data release of body-frame trajectory dataset for the research community.
+- **Parallel Track (sensing physics).** Reaction-time-budget analysis and sensor-architecture characterization for fast-moving-object detection at body-frame engagement distances.
 
 There is no Phase N for actuation. By design.
 
 ---
 
-## Disclaimer (Verbatim)
+## Disclaimer
 
 > SENTINEL-WEAR is a research and education project. It is not a medical device, not a personal protective equipment certification, not a self-defense product, not a substitute for situational awareness, and not a substitute for any law-enforcement, medical, or emergency service. The maintainers make no warranty of fitness for any safety-critical use. Use at your own risk for educational purposes only.
 
