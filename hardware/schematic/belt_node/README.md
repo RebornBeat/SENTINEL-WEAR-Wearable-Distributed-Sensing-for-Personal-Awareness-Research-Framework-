@@ -1,150 +1,57 @@
-# Belt Node — Primary Compute & Torso Reference
+# Belt Node — Hardware Schematic Reference Design
 
-**Project:** SENTINEL-WEAR
-**Node Type:** Primary Compute Hub
-**Form Factor:** Belt buckle / Belt-worn enclosure
-
----
-
-## 1. Role in the Mesh
-
-The Belt Node is the central coordination unit of the SENTINEL-WEAR system. It acts as the **Body-Frame Origin** for the entire wearable mesh.
-
-**Primary Functions:**
-- **Compute Hub:** Runs the main fusion algorithms (`sentinel-fusion`), predictive tracking (`pentatrack_bridge`), and system coordination.
-- **Torso Reference:** Provides the inertial reference frame for the body. The IMU on the belt node defines the "forward" and "up" vectors for the entire system.
-- **Sensing:** Equipped with its own sensors for independent coverage of the torso volume.
-- **Communication Hub:** Manages the Body-Area Network (BAN), routing data from all other nodes (pendant, bracelets, anklets).
+**Node Position:** Waist belt / belt clip
+**Role:** Primary compute, battery hub, mesh gateway, downward sensing
+**Status:** Reference design, variant 1 of N.
 
 ---
 
-## 2. Sensor Stack
+## Purpose
 
-The Belt Node is a fully capable sensing node in addition to being the compute hub.
+The belt node is the most capable node in the mesh. It runs the `sentinel-belt-controller` binary (the main fusion, tracking, and alerting process) and serves as the gateway between the body-area mesh and any external interfaces (phone, companion app, emergency contact). Its waist position also provides downward coverage of the ground plane.
 
-**Standard Suite:**
-- **mmWave Radar:** Primary sensor for torso-level presence/velocity.
-- **IMU (6/9-DOF):** Torso-frame orientation reference.
-- **Environmental Sensors:** Temperature, pressure (optional).
-
-**Optional / Research Variants:**
-- **Solid-State LiDAR:** Short-range geometry (forward-facing).
-- **Microphone Array:** Audio event detection at waist level.
-- **Haptic Actuator:** For direct feedback.
-
-**No Identification Layer:**
-- The Belt Node does **not** carry an identification sensor (camera). Identification is the role of the Pendant Node (opt-in).
+Weight budget for belt nodes is relaxed (~100–300 g including battery) since belt-mounted devices are supported by the hip rather than the wrist or neck.
 
 ---
 
-## 3. Hardware Architecture (Block Diagram)
+## Candidate Component Set (Test Variants — Not Locked)
 
-```
-                 ┌───────────────────────────────────────────┐
-                 │               Belt Node                   │
-                 │                                           │
-                 │  ┌─────────┐  ┌─────────┐  ┌───────────┐  │
-                 │  │ mmWave │  │   IMU   │  │ Env Sensor│  │
-                 │  │ Radar  │  │(Torso)  │  │  (Opt)    │  │
-                 │  └────┬────┘  └────┬────┘  └─────┬─────┘  │
-                 │       │            │             │        │
-                 │       └────────────┼─────────────┘        │
-                 │                    │                      │
-                 │              ┌─────┴─────┐                │
-                 │              │   MCU /   │                │
-                 │              │ App Proc  │                │
-                 │              │           │                │
-                 │              │ (Runs     │                │
-                 │              │ sentinel- │                │
-                 │              │ belt-     │                │
-                 │              │ controller)│               │
-                 │              └─────┬─────┘                │
-                 │                    │                      │
-                 │       ┌────────────┼────────────┐         │
-                 │       │            │            │         │
-                 │  ┌────┴────┐  ┌────┴────┐  ┌───┴───┐     │
-                 │  │ BAN     │  │ USB-C   │  │ Batt  │     │
-                 │  │ Radio   │  │ Debug/  │  │ Mgmt  │     │
-                 │  │ (Hub)   │  │ Charge  │  │       │     │
-                 │  └─────────┘  └─────────┘  └───────┘     │
-                 │                                           │
-                 └───────────────────┬───────────────────────┘
-                                     │
-                          BAN Network (to other nodes)
-```
+### Primary Compute Module
+- **Variant A:** Raspberry Pi Compute Module 4 (CM4) — quad-core Cortex-A72, 4–8 GB RAM, eMMC, Wi-Fi, BT. Runs full Linux + `sentinel-belt-controller` binary. Maximum capability.
+- **Variant B:** NXP i.MX 8M Plus — quad-core Cortex-A53 + Cortex-M7, NPU 2.3 TOPS, Linux/RTOS. Enables on-device neural inference for classification enhancement.
+- **Variant C:** Qualcomm SA8155P — automotive-grade SoC, Linux, high compute for real-time body-frame fusion at scale.
+- **Variant D:** ESP32-S3 + dedicated MCU for sensor handling — lower cost, embedded RTOS, limited classification capability. Suitable for minimal-node deployments.
 
----
+Selection criteria: ability to run Rust `sentinel-belt-controller` binary, RAM sufficient for full body-frame fusion (PentaTrack + 6 nodes), BAN radio integration, battery life impact.
 
-## 4. Processor Options
+### MCU Co-Processor (Sensor Interface)
+- **Variant A:** STM32U5 (handles sensor I/O, BAN radio, while primary compute handles fusion)
+- **Variant B:** nRF5340 network core (handles BAN protocol while app core handles fusion)
 
-**Research Phase:** No single processor is mandated. The hardware design should be modular to accept different MCUs/SoCs based on research needs.
+A co-processor pattern separates real-time sensor interrupt handling from OS-level fusion processing.
 
-- **High-Performance MCU:** STM32H7, i.MX RT, or similar. Required for running the full `sentinel-belt-controller` Rust stack with `std` support.
-- **Embedded Linux Module:** For maximum compute power (e.g., running complex models).
+### Downward-Facing mmWave Radar
+- **Variant A:** TI IWR6843AOP (60 GHz, AOA capable, oriented downward from belt buckle)
+- **Variant B:** Acconeer XR112 (ultra-compact, lower power)
 
-**Constraint:** Must have sufficient I/O for:
-- 1x SPI/UART for mmWave Radar
-- 1x I2C for IMU + Env Sensors
-- 1x SPI/I2C for BAN Radio (BLE/UWB)
+Downward coverage detects: objects approaching from below knee level, ground surface for gait analysis (combined with anklet IMUs), potential trip hazards.
 
----
+### IMU (Torso Reference)
+- **Variant A:** Bosch BMI270 (consistent with all other nodes)
 
-## 5. Power Management
+The belt IMU is the torso reference. All other node IMUs are expressed relative to this one in the body-frame coordinate system.
 
-- **Battery:** Largest capacity in the system (worn at waist).
-- **Charging:** USB-C input.
-- **Power Budget:** Must support continuous operation of the primary compute loop + BAN hub duties.
-- **Research Question:** Can the belt node power other nodes inductively? (Out of scope for current version, but relevant for future iterations).
+### BAN Radio (Body-Area Network)
+- **Variant A:** Nordic nRF52840 co-processor (BLE 5.3 mesh, handles all inter-node communication)
+- **Variant B:** Decawave DW3000 UWB (for precise ranging and sub-ms sync — research variant)
 
----
+### External Interface
+- Wi-Fi 6 (via compute module) for companion app connection on home network
+- Bluetooth 5.3 for mobile companion app (when not on same Wi-Fi)
+- USB-C for PC companion app and charging
+- LTE module (optional) for emergency contact when off home network — **Variant A:** Quectel EC21 (LTE Cat 1)
 
-## 6. Form Factor
-
-- **Enclosure:** Must be comfortable for continuous wear at the waist.
-- **Weight:** Higher tolerance than other nodes (up to ~200g).
-- **Thermal:** Compute load generates heat. Enclosure must dissipate heat away from the body.
-
----
-
-## 7. Design Variants
-
-| Variant | Processor | Role |
-| :--- | :--- | :--- |
-| **Standard** | High-perf MCU | Runs `sentinel-belt-controller` (Rust binary) |
-| **Advanced** | Linux SoM | Runs full Linux stack (heavy fusion models) |
-
----
-
-## 8. Directory Structure
-
-```
-hardware/schematic/belt_node/
-├── belt_node.kicad_pro          # KiCad project file
-├── belt_node.kicad_sch          # Main schematic
-├── belt_node.kicad_pcb          # PCB layout
-├── belt_node.kicad_prl          # Project settings
-├── fp-info-cache                # Footprint cache
-├── fp-lib-table                 # Footprint libraries
-├── sym-lib-table                # Symbol libraries
-└── README.md                    # This file
-```
-
----
-
-## 9. Interface Summary
-
-| Interface | Function | Notes |
-| :--- | :--- | :--- |
-| **BAN Radio** | Mesh Network | Hub for all other nodes |
-| **USB-C** | Power + Debug | Charging & firmware flashing |
-| **mmWave Radar** | Presence/Velocity | Torso-level sensing |
-| **IMU** | Orientation | **Critical:** Defines body frame |
-| **Env Sensor** | Context | Temp/Pressure (optional) |
-
----
-
-## 10. Future Research Directions
-
-- **Inductive Charging:** Remove USB port for waterproofing.
-- **Kinetic Charging:** Harvest energy from walking motion.
-- **Expandable I/O:** Header for additional research sensors.
+### Battery
+- Li-Ion 18650 cells (2× parallel for 5000–7000 mAh) — primary battery bank
+- Powers: all belt-node compute + charges bracelet/anklet nodes via integrated charging ICs
+- Target 8–24 hours runtime depending on activity level and sensing configuration
