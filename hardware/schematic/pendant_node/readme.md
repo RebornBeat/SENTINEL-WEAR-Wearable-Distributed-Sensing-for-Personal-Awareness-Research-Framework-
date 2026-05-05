@@ -1,243 +1,87 @@
-# Pendant Node — Hardware Reference Design
+# Pendant Node — Hardware Schematic Reference Design
 
-**Project:** SENTINEL-WEAR
-**Node Type:** Primary Sensing & Identification Node (Upper Hemisphere Coverage)
-**Form Factor:** Pendant / Chest-Mounted
-**Status:** Reference Design v1.0
-**License:** CERN-OHL-S v2
+**Node Position:** Neck/chest — worn as a necklace or pendant
+**Sensor Coverage:** Upper hemisphere (360° azimuth, upward elevation)
+**Status:** Reference design, variant 1 of N. All component choices are test candidates.
 
 ---
 
-## 1. Overview
+## Purpose
 
-The Pendant Node is the primary upper-hemisphere sensing unit in the SENTINEL-WEAR architecture. Positioned on the chest, it provides:
-- **360° Azimuth Coverage:** Forward-facing hemisphere.
-- **Elevation Coverage:** Upward and forward-looking.
-- **Primary Identification Layer:** Hosts the optional Identification Module.
-- **Primary Compute:** In some configurations, can act as a secondary compute node.
-
-This directory contains the KiCad schematic and PCB layout files for the Pendant Node. It is a **reference design**. Researchers are free to substitute components, increase sensor capabilities, or modify the form factor to suit their specific experimental needs.
+The Pendant Node is the highest-information-value wearable node. Its chest/neck position gives it 360° azimuthal view of the environment at chest height — the most relevant sensing plane for approaching humans and objects. It also hosts:
+- The primary acoustic sensor for sound-event direction and material classification
+- The optional identification sensor (visual/biometric — opt-in, kill-switch gated)
+- IMU for body-frame pose contribution
 
 ---
 
-## 2. Design Philosophy
+## Candidate Component Set (Test Variants — Not Locked)
 
-### 2.1 Limitless Configuration
-This design does not impose artificial constraints on capabilities.
-- **Sensors:** The reference design uses a specified set of sensors, but the PCB layout accommodates alternative footprints where possible.
-- **Processing:** The MCU selection provides ample headroom for algorithm development.
-- **Connectivity:** No hardcoded connectivity assumptions. The node supports local-only logging, BLE streaming, and Wi-Fi backhaul (via a module).
+### MCU
+- **Variant A:** Nordic nRF5340 (Cortex-M33 app + M33 net, BLE 5.3, USB, excellent power management)
+- **Variant B:** STM32WB55 (Cortex-M4 + M0+, BLE 5.0, ultra-low power, 2.4 GHz)
 
-### 2.2 Sensing vs. Identification
-The Pendant Node physically separates the **Sensing Layer** from the **Identification Layer**:
-- **Sensing Layer:** Always-on, privacy-preserving (mmWave, IMU, Acoustic). Powered by the main power rail.
-- **Identification Layer:** The camera/biometric module. **Controlled by a dedicated hardware kill switch (SW1)**. The MCU firmware must read the kill-switch state at boot and halt execution if the switch is in the "disabled" position.
+The pendant MCU handles: radar processing, IMU filter, acoustic beamforming (partial), BAN radio, and (when opted-in) identification sensor interface. Compute requirements are moderate.
 
----
+### mmWave Radar
+- **Variant A:** Texas Instruments IWR6843ISK (60 GHz, evaluation module form factor — for early testing)
+- **Variant B:** Acconeer XR112 module (60 GHz, SPI, ultra-compact — for wearable integration)
+- **Variant C:** Infineon BGT60ATR24C (60 GHz, MMIC, requires external antenna design)
 
-## 3. High-Level Block Diagram
+Coverage: antenna oriented to maximize forward and lateral hemisphere coverage from chest position.
 
-```
-[ Power Input / Charger ]
-          │
-    [ PMIC / Power Mgmt ]───────────┐
-          │                         │
-          ▼                         ▼
-[ Main MCU (nRF5340 / STM32H7) ]   [ haptic driver ]
-          │
-          ├───[ mmWave Radar (I2C/SPI) ]
-          │
-          ├───[ IMU (SPI) ]
-          │
-          ├───[ Microphone Array (I2S/PDM) ]
-          │
-          ├───[ Environmental Sensors (I2C) ]
-          │
-          ├───[ Event Sensor (SPI) ] (Optional)
-          │
-          └───[ Identification Module ]
-                 │
-                 ├───[ Camera Module (MIPI CSI / SPI) ]
-                 │
-                 └───[ Kill Switch (GPIO) ]
-```
+### IMU
+- **Variant A:** Bosch BMI270 (6-axis, OIS, ultra-low power, SPI/I2C, 0.1 mg noise density)
+- **Variant B:** Invensense ICM-42688-P (6-axis, 0.07 mg noise density, SPI, smallest package)
+- **Variant C:** ST LSM6DSV (6-axis + temperature, iNEMO 7-axis, FIFO, SPI)
 
----
+IMU is critical for body-frame drift correction. Noise density and bias stability are the primary selection criteria.
 
-## 4. Component Selection (Reference Design v1.0)
+### Microphone Array (Acoustic)
+- **Variant A:** Knowles SPH0645LM4H × 3 (I2S PDM, compact, 65 dBA SNR) — 3-element planar array
+- **Variant B:** ST MP23DB01HP × 4 (analog, 64 dBA SNR) — 4-element tetrahedral on flexible PCB
 
-### 4.1 Microcontroller (MCU)
-**Reference Part:** Nordic Semiconductor nRF5340
-- **Architecture:** Dual-core Arm Cortex-M33 (Application Core + Network Core)
-- **Clock:** 128 MHz (App Core), 64 MHz (Net Core)
-- **Flash:** 1 MB Application Flash, 256 KB RAM
-- **Connectivity:** Bluetooth 5.1 / LE Audio, IEEE 802.15.4 (Thread), SPI, I2C, I2S, PDM, UART.
-- **Reasoning:** Integrated BLE radio (critical for BAN), high-performance core for sensor fusion, ample memory for logging and algorithm development.
+Array configuration: planar 3-element for space-constrained pendants; tetrahedral 4-element for better 3D direction-of-arrival in belt-form pendant variants.
 
-### 4.2 Sensors
+### Identification Sensor (Opt-In Only — Kill Switch Required)
+All variants under research. None mandated. The kill switch is mandatory before any variant can be activated.
 
-#### 4.2.1 mmWave Radar
-**Reference Part:** Texas Instruments IWR6843ISK-ODS or Infineon BGT60LTR11AIP
-- **Interface:** SPI + GPIOs (Data Ready, Reset).
-- **Frequency:** 60–64 GHz.
-- **Features:** On-chip antenna, presence detection, gesture recognition.
-- **Power:** 3.3V.
+- **Variant A:** OmniVision OV2640 (2 MP, small package, MIPI/DVP) — camera-based face detection
+- **Variant B:** Luxonis OAK-D Lite (stereo + neural inference on-module) — self-contained identification
+- **Variant C:** HiMax HM01B0 (QVGA, 2.1 mW, ultra-low power) — minimal footprint, first-stage detection
+- **Variant D:** None — pendant in audio-only identification mode using voice biometrics
 
-#### 4.2.2 Inertial Measurement Unit (IMU)
-**Reference Part:** TDK InvenSense ICM-42688-P
-- **Interface:** SPI.
-- **Gyro Range:** ±2000 dps.
-- **Accel Range:** ±16 g.
-- **Features:** Low noise, high stability, on-chip FIFO.
-- **Purpose:** Node orientation, gesture detection, pedestrian dead reckoning.
+Selection criteria: classification accuracy at 1–3 m, on-device inference capability (no raw video off-module), power consumption impact on battery life.
 
-#### 4.2.3 Acoustic Array
-**Reference Part:** Knowles SPH0645LM4H-B (x2) or equivalent PDM microphones.
-- **Interface:** PDM (connected to MCU I2S/PDM peripheral).
-- **Configuration:** 2-microphone array (spaced ~20mm apart) for basic direction-of-arrival (DOA) estimation.
+### BAN Radio
+- **Variant A:** BLE 5.3 via nRF5340 network core (if MCU is nRF5340)
+- **Variant B:** UWB via Qorvo DW3000 (sub-ns timestamping, <1 m ranging accuracy, higher power)
 
-#### 4.2.4 Environmental Sensors (Optional)
-**Reference Part:** Bosch BME680
-- **Interface:** I2C or SPI.
-- **Measures:** Temperature, Humidity, Pressure, Gas (VOC).
-- **Purpose:** Contextual awareness.
+BLE: adequate latency for awareness alerts. UWB: required if precise ranging or sub-millisecond sync is needed (research variant).
 
-#### 4.2.5 Event Sensor (Optional / Advanced)
-**Reference Part:** Sony IMX637 (Prophesee EVK) or iniVation DAVIS346.
-- **Interface:** MIPI CSI-2 or USB (depending on module).
-- **Purpose:** High-speed transient detection (extreme velocity research track).
-- **Note:** This is an advanced research option. The base design may route high-speed differential pairs to a connector for an external module.
-
-### 4.3 Identification Module (Opt-In Layer)
-**Reference Part:** Raspberry Pi Camera Module 3 or Arducam IMX477.
-- **Interface:** MIPI CSI-2 (direct to MCU) or SPI (for lower-res modules).
-- **Control:**
-    - **Power:** Enabled/disabled by a load switch controlled by the MCU.
-    - **Kill Switch (SW1):** A physical slider switch that disconnects the Identification Module's power rail and data lines directly. **The MCU must sample this switch at boot.** If the switch is OFF, the MCU must not attempt to initialize the camera driver.
-
-### 4.4 Power Management
-**Reference Part:** Nordic nPM1300 PMIC
-- **Features:** Battery charging (LiPo/Li-Ion), Buck regulators, Fuel Gauge.
-- **Battery:** Single-cell LiPo (300–600 mAh typical for pendant form factor).
-- **Charging:** USB-C (5V).
-
-### 4.5 Haptics
-**Reference Part:** TI DRV2605L Haptic Driver.
-- **Interface:** I2C.
-- **Actuator:** LRA (Linear Resonant Actuator).
+### Battery
+- **Target:** LiPo 3.7V, 150–300 mAh (jewelry weight budget: 10–15 g battery maximum)
+- **Variants under test:** 150 mAh (ultra-thin, 1.5 mm), 200 mAh (standard pendant thickness), 300 mAh (bulkier pendant, 5 mm)
 
 ---
 
-## 5. Pin Mapping & Configuration
+## Form Factor Constraints
 
-*(Note: This is a reference mapping for the nRF5340. Adjust based on your specific MCU selection and pin availability.)*
+Weight budget: 30–60 g total including enclosure, battery, and all electronics (see `docs/theory/form_factor_human_factors.md`).
 
-### 5.1 mmWave Radar (IWR6843)
-| Signal | nRF5340 Pin | Description |
-| :--- | :--- | :--- |
-| `SPI_MOSI` | P1.00 | SPI Master Out Slave In |
-| `SPI_MISO` | P1.01 | SPI Master In Slave Out |
-| `SPI_CLK` | P1.02 | SPI Clock |
-| `RADAR_CS` | P1.03 | Chip Select |
-| `RADAR_RST` | P1.04 | Reset |
-| `RADAR_IRQ` | P1.05 | Data Ready Interrupt |
+PCB dimensions: approximately 30 mm × 25 mm for electronics (multiple PCB stacking acceptable for depth).
 
-### 5.2 IMU (ICM-42688-P)
-| Signal | nRF5340 Pin | Description |
-| :--- | :--- | :--- |
-| `IMU_CS` | P1.06 | Chip Select |
-| `IMU_INT` | P1.07 | Data Ready Interrupt |
-| `SPI_MOSI` | P1.00 | (Shared with Radar) |
-| `SPI_MISO` | P1.01 | (Shared with Radar) |
-| `SPI_CLK` | P1.02 | (Shared with Radar) |
+Charging: USB-C or magnetic POGO pin (compatible with jewelry wear and water resistance).
 
-### 5.3 Acoustic (PDM Microphones)
-| Signal | nRF5340 Pin | Description |
-| :--- | :--- | :--- |
-| `PDM_CLK` | P1.08 | Clock Output |
-| `PDM_DATA` | P1.09 | Data Input |
-
-### 5.4 Identification Module (Camera)
-| Signal | nRF5340 Pin | Description |
-| :--- | :--- | :--- |
-| `CAM_PWDN` | P1.10 | Power Down Control |
-| `KILL_SW` | P1.11 | **Hardware Kill Switch Input** (Read at boot) |
-| `MIPI_CSI_CLK+` | Dedicated | High-speed diff pair |
-| `MIPI_CSI_D0+` | Dedicated | High-speed diff pair |
-
-### 5.5 Power, Haptics, & Debug
-| Signal | nRF5340 Pin | Description |
-| :--- | :--- | :--- |
-| `HAPTIC_PWM` | P1.12 | PWM to DRV2605L |
-| `I2C_SDA` | P1.13 | I2C Data |
-| `I2C_SCL` | P1.14 | I2C Clock |
-| `SWD_CLK` | P0.18 | Debug |
-| `SWD_DIO` | P0.20 | Debug |
-| `USB_D+` | Dedicated | USB Data+ |
-| `USB_D-` | Dedicated | USB Data- |
-| `BAT_SENSE` | AIN0 | Battery Voltage (via divider) |
+Water resistance: IP54 minimum (sweat, rain); IP67 target (hand washing, brief immersion).
 
 ---
 
-## 6. Power Architecture
+## Kill Switch Implementation
 
-### 6.1 Power Rails
-- **V_BAT:** Direct battery connection (3.7V - 4.2V).
-- **V_SYS:** System power (3.3V), regulated by nPM1300.
-- **V_RADAR:** 3.3V, always-on.
-- **V_IMU:** 3.3V, always-on.
-- **V_MCU:** 3.3V, always-on.
-- **V_CAM:** 3.3V or 2.8V (camera dependent), **switched by MOSFET controlled by MCU + Kill Switch.**
+The identification sensor kill switch is a physical slider integrated into the pendant enclosure. When in DISABLED position:
+- Power rail to identification sensor is cut by hardware (MOSFET gate controlled by slider position)
+- Data lines (MIPI/USB) are disconnected by hardware (analog switches in series)
+- MCU GPIO reads kill-switch state at boot; if DISABLED, `ImagingSensor::initialize()` returns `KillSwitchEngaged`
 
-### 6.2 Kill Switch Logic (CRITICAL)
-The Kill Switch (`SW1`) is a physical DPST (Double Pole Single Throw) slider switch.
-1.  **Pole 1:** Breaks the `V_CAM` power rail.
-2.  **Pole 2:** Breaks the MIPI data lines or connects a `KILL_SW` signal to MCU GPIO.
-
-**Firmware Requirement:**
-- The MCU **must** read the `KILL_SW` GPIO pin early in the boot process (before initializing any peripherals).
-- If `KILL_SW` is LOW (switch OFF), the MCU **must halt** or enter a safe state and **never attempt to power on or communicate with the Identification Module.**
-
----
-
-## 7. Form Factor Constraints
-
-- **Dimensions:** Maximum 50mm x 50mm (excluding mounting lugs/loop).
-- **Height:** < 15mm populated height.
-- **Weight Target:** < 70g (including battery).
-- **Enclosure:** Designed to fit within a jewelry-grade pendant enclosure. The CAD files for the mechanical enclosure are in `/mechanical/cad/pendant_enclosure.step`.
-
----
-
-## 8. Bill of Materials (BOM) Overview
-
-A full BOM is available in `hardware/bom/pendant_node_bom.csv`.
-
-**Key Components Summary:**
-- U1: nRF5340-QKAA-AB0R (MCU)
-- U2: IWR6843ISK-ODS (Radar)
-- U3: ICM-42688-P (IMU)
-- U4: nPM1300 (PMIC)
-- U5: DRV2605L (Haptic Driver)
-- MK1, MK2: SPH0645LM4H-B (Microphones)
-- J1: USB-C Connector
-- SW1: DPST Slide Switch (Kill Switch)
-
----
-
-## 9. Layout Guidelines
-
-1.  **RF Section:** The mmWave radar antenna area must be free of copper and components on all layers. Follow the antenna keep-out recommendations from the IWR6843 datasheet strictly.
-2.  **High-Speed Signals:** Route MIPI CSI traces with controlled impedance (typically 100Ω differential). Length-match the pairs.
-3.  **Power:** Use adequate decoupling capacitors close to all power pins of the MCU and Radar.
-4.  **Grounding:** Use a solid ground plane. Star grounding is recommended to prevent digital noise from coupling into the sensitive analog/mic inputs.
-
----
-
-## 10. Hardware Configuration Options
-
-The following resistors/jumpers configure the board:
-
-- **J2:** Radar SPI Chip Select source (MCU or external debugger).
-- **R43:** Pull-up resistor for I2C bus (Populate if needed).
-- **R44:** Camera Power Down pull-down (Default OFF).
+The slider position must be visible to the wearer without removing the pendant.
