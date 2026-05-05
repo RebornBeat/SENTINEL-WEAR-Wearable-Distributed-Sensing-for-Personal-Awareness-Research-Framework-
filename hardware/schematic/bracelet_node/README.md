@@ -1,111 +1,65 @@
-# Bracelet Node — SENTINEL-WEAR
+# Bracelet Node — Hardware Schematic Reference Design
 
-**Form Factor:** Jewelry-grade wearable (wrist/forearm mount)
-**Role:** Forearm-frame distributed sensing + Haptic alert output
-**Status:** Research / Reference Design
-
----
-
-## 1. Purpose
-
-The Bracelet Node is one of the primary sensing and interaction nodes in the SENTINEL-WEAR mesh. Worn on the wrist or forearm, it provides:
-
-*   **Sensing:** Covers the forward and lateral hemispheres relative to the wearer’s arm.
-*   **Body-Frame Contribution:** The node’s IMU data feeds the multi-IMU body-pose estimator, contributing to the overall body-frame stabilization.
-*   **Alerting:** The primary haptic actuator for directional alerts is housed here. When an object approaches from the wearer’s left side, the left bracelet fires the haptic pattern.
+**Node Position:** Wrist/forearm — worn on both left and right wrists
+**Sensor Coverage:** Forearm hemisphere (forward of body, arm-direction dependent)
+**Status:** Reference design, variant 1 of N.
 
 ---
 
-## 2. Architectural Capabilities
+## Purpose
 
-The architecture imposes no limits on the specific components used. The following describes the *functional categories* a Bracelet Node typically integrates. The specific sensor models, power budget, and form factor are determined by the research configuration and available hardware.
+The bracelet nodes are the primary directional alert delivery nodes. The wrists face outward during normal posture and arm swing, making them ideal for:
+- Haptic alert delivery (the node closest to the approach direction buzzes)
+- Forearm-hemisphere radar coverage
+- IMU for arm-segment body-frame contribution and gesture detection
 
-### Sensing
-
-*   **mmWave Radar:** Primary modality for detecting presence, velocity (via Doppler), and micro-Doppler activity signatures (human vs. animal vs. vehicle). The radar illuminates the forearm-frame hemisphere.
-*   **IMU (6-axis or 9-axis):** Provides the node’s orientation relative to the body frame. The orientation is critical for transforming detections from the node frame to the torso frame.
-*   **Short-range LiDAR / ToF (Optional):** For close-range geometry refinement where radar resolution is insufficient.
-
-### Output
-
-*   **Haptic Actuator:** A linear resonant actuator (LRA) or eccentric rotating mass (ERM) motor for directional haptic alerts. The haptic encoder in the firmware generates patterns that encode alert class and urgency.
-
-### Communication
-
-*   **Body-Area Network (BAN) Radio:** BLE 5.x or UWB for low-latency communication with the belt controller. Transmits processed detection metadata (not raw sensor data) and receives haptic commands.
-
-### Power
-
-*   **Battery:** Rechargeable Li-Po, sized according to the user’s runtime requirements and sensor complement.
-*   **Charging:** Magnetic pogo pins or wireless charging coil, compatible with the chosen enclosure design.
+Two bracelet nodes (left and right wrist) together cover the lateral body hemispheres and improve forward/rear directional discrimination.
 
 ---
 
-## 3. Connectivity-Agnostic Design
+## Candidate Component Set (Test Variants — Not Locked)
 
-The Bracelet Node is a component of a distributed sensing mesh. Its communication is not restricted to a specific back-end:
+### MCU
+- **Variant A:** Nordic nRF5340 (as pendant — consistent development across nodes)
+- **Variant B:** Silicon Labs EFR32BG24 (BLE 5.3, ultra-low power, Cortex-M33)
 
-*   **Local-Only:** Can operate entirely offline, transmitting only to the belt controller for body-frame fusion.
-*   **Cloud-Connected:** Can be configured (via the belt controller) to relay metadata to a cloud endpoint.
-*   **Hybrid:** Any combination.
+Bracelet MCU compute requirements are lower than pendant. The primary tasks are: radar polling, IMU Madgwick filter, haptic control, BAN radio.
 
-**No data limits are imposed.** If the research configuration requires logging raw radar IQ data or IMU samples at 1kHz to a local buffer or external storage, the hardware design should accommodate the necessary flash/RAM or expose the interface to an external logger.
+### mmWave Radar
+- **Variant A:** Acconeer XR112 (60 GHz, SPI, low power, compact) — preferred for wrist form factor
+- **Variant B:** Infineon BGT60ATR24C with custom 2-element patch antenna
 
----
+Antenna orientation: PCB antenna arrays oriented toward the palm/dorsal face of the wrist. The goal is to maximize coverage of the hemisphere in front of and to the side of the bracelet-wearing arm.
 
-## 4. Sensing vs. Identification
+### IMU
+- **Variant A:** Bosch BMI270 (as pendant — consistent calibration)
+- **Variant B:** Invensense ICM-42688-P (smallest package option)
 
-The Bracelet Node is part of the **Sensing Layer**.
+### Haptic Actuator
+- **Variant A:** Precision Microdrives C10-100 linear resonant actuator (LRA, 10 mm diameter, 150 Hz resonance)
+- **Variant B:** Precision Microdrives 307-103 (ERM, vibration motor, wider frequency range)
+- **Variant C:** AAC Technologies ALPS HF2-C3 (thin LRA, 2 mm z-height, for ultra-slim bracelet)
 
-*   **It provides physics-based identification:**
-    *   Radar micro-Doppler → Activity class (walking, running).
-    *   Radar/LiDAR geometry → Size class.
-*   **It does NOT include an identification sensor (camera/biometric).**
-    *   The Identification Layer is reserved for the Pendant Node (opt-in).
-    *   The Bracelet Node is camera-free by architecture, ensuring no privacy-invasive modality is present in this part of the mesh.
+LRA (Linear Resonant Actuator) preferred over ERM for distinct directional patterns and lower power. Haptic driver IC: Texas Instruments DRV2605L (I2C, waveform library, auto-resonance detection).
 
-**Therefore, no hardware kill-switch for an identification sensor is required on this node.** A power switch is recommended for user control, but not a camera-specific interlock.
+### BAN Radio
+- BLE 5.3 via MCU integrated radio
 
----
+### Battery
+- LiPo 3.7V, 200–400 mAh
+- Target 24–72 hour runtime between charges
 
-## 5. Design Philosophy: Limitless Configuration
-
-This reference design does not constrain:
-
-*   **Sensor Specifications:** Resolution, range, and update rate are determined by the selected components.
-*   **Power Budget:** User-specified based on desired runtime and sensor load.
-*   **Form Factor:** Can be miniaturized to jewelry-scale or expanded for research bench testing.
-
-If the research path identifies a need for higher-performance sensors, the PCB footprint and power subsystem should be adapted accordingly. The firmware architecture (Rust, `no_std`) is modular and can drive a wide range of sensors via the OMNI-SENSE trait interfaces.
+### Charging
+- Magnetic pogo-pin charging contacts on inner wrist surface (skin-contact side)
 
 ---
 
-## 6. Directory Contents
+## Bracelet-Specific Design Notes
 
-This directory contains the hardware design files for the Bracelet Node reference implementation.
+**Form factor:** Bracelet must sit comfortably against the wrist without impeding wrist flexion. PCB should be placed in the dorsal (back-of-hand) facing section of the band. Sensor apertures face away from wrist.
 
-```
-bracelet_node/
-├── bracelet_node.kicad_pro      # KiCad project file
-├── bracelet_node.kicad_sch      # Main schematic
-├── bracelet_node.kicad_pcb      # PCB layout
-├── bracelet_node.kicad_prl      # KiCad project settings
-├── fp-info-cache                # Footprint cache
-├── fp-lib-table                 # Footprint library table
-├── sym-lib-table                # Symbol library table
-├── README.md                    # This file
-└── gerbers/                     # Generated manufacturing files (if present)
-    ├── *.gbr                    # Gerber files
-    └── *.drl                    # Drill files
-```
+**Antenna design:** mmWave antennas at 60 GHz are small (few mm) and can be integrated into the PCB silkscreen area. The antenna patch should face outward (away from wrist) to avoid body absorption.
 
-*The Gerber files may not be present in the initial commit. They are generated from the KiCad PCB file.*
+**Water resistance:** IP67. Sweat, rain, hand washing are guaranteed exposure conditions.
 
----
-
-## 7. Related Documentation
-
-*   **Firmware:** `firmware/src/bin/bracelet_left.rs` / `bracelet_right.rs`
-*   **Sensing Pipeline:** `crates/sentinel-perception/src/radar_pipeline.rs`, `imu_pipeline.rs`
-*   **Haptic Logic:** `crates/sentinel-alerts/src/haptic_encoder.rs`
-*   **System Architecture:** `docs/theory/body_coordinate_fusion.md`
+**Material contact:** All skin-contact surfaces must use hypoallergenic materials: titanium, surgical steel, medical-grade silicone, or hard-coated aluminum (EN 1811 nickel release compliance).
