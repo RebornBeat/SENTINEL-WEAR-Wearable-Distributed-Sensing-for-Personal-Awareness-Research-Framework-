@@ -1,140 +1,63 @@
-# Hardware — SENTINEL-WEAR Anklet Node
+# Anklet Node — Hardware Schematic Reference Design
 
-**Form Factor:** Jewelry-grade anklet / lower-leg band
-**Primary Role:** Ground-plane sensing, gait analysis, lower-hemisphere coverage, rear/side approach alerts
-**Node Class:** Sensing-only (no identification sensor)
-
----
-
-## 1. Purpose
-
-The Anklet Node is responsible for sensing the lower hemisphere of the wearer’s body-frame. It tracks ground proximity, detects low obstacles, contributes heavily to gait analysis (leg swing phase), and serves as a primary haptic output for threats approaching from the rear or low angles.
-
-Its position on the lower leg gives it a unique geometric vantage point: it can see under furniture, sense floor-level movement, and detect ground impact forces directly through the IMU.
+**Node Position:** Lower leg / above ankle — worn on both left and right ankles
+**Sensor Coverage:** Ground plane, low-elevation detection, gait analysis
+**Status:** Reference design, variant 1 of N.
 
 ---
 
-## 2. Sensor Stack
+## Purpose
 
-The Anklet Node carries a focused sensor set optimized for its lower-body role. This is a **reference configuration**; the architecture imposes no limits on substitution or upgrades.
+The anklet nodes are the ground-level awareness layer. Their position close to the ground provides:
+- Detection of floor-level objects (pets, low-profile intruders, trip hazards)
+- Ground-plane coverage for approaching targets below the knee
+- IMU for leg-segment pose and the primary input for gait analysis
+- Haptic alerts for ground-level threats or directional cues from below
 
-| Component | Role | Typical Part Class | Notes |
-| :--- | :--- | :--- | :--- |
-| **Short-Range LiDAR / ToF** | Ground clearance, floor-level geometry | Single-point or 1D ToF module (e.g., VL53L5CX, TFMini-S) | Direct measurement of distance to floor/obstacles. |
-| **IMU (6-axis)** | Leg swing, gait phase, orientation | BMI270, ICM-42688-P | Detects step events, stride length, kick gestures. |
-| **Haptic Actuator** | Directional alerts | LRA or ERM, 8–10mm diameter | Provides buzz for rear/side approach alerts. |
-| **BAN Radio** | Body-area network comms | BLE 5.2 SoC (nRF5340, ESP32-C6) | Must support low-power advertising + burst transfer. |
-| **Environmental (Optional)** | Temp/Humidity | BME280, SHT4x | Context for gait analysis (heat/humidity). |
-| **Battery** | Power | LiPo pouch (100–200 mAh typical) | Sized for 12–24 hour active wear. |
-
-**Constraints:**
-- **No Camera:** This is a sensing node only.
-- **Form Factor:** Must fit within a profile that doesn’t snag on pants, furniture, or brush.
+The distinctive motion profile of anklet nodes during walking (large, periodic oscillations) makes them excellent calibration anchors for the walk-through calibration process.
 
 ---
 
-## 3. Mechanical Design
+## Candidate Component Set (Test Variants — Not Locked)
 
-### Placement
-- Worn on the lower leg, typically **superior to the malleolus (ankle bone)**.
-- Secured by a strap or integrated band.
-- Can be medial or lateral; calibration expects left/right asymmetry.
+### MCU
+- **Variant A:** Nordic nRF5340 (consistent with bracelet and pendant)
+- **Variant B:** Silicon Labs EFR32BG24 (lower power for longer battery in ankle form factor)
 
-### Enclosure
-- **Material:** Hypoallergenic polymer or metal alloy (titanium, surgical steel).
-- **IP Rating:** Minimum IP67 (water/sweat resistance).
-- **Finish:** Rounded edges to avoid skin irritation during running.
-- **Weight Target:** < 80g total (including battery).
+### Short-Range Sensing
+Anklets are constrained by proximity to the ground and body. Long-range radar is less useful here.
+- **Variant A:** Acconeer XR112 (ultra-compact, 60 GHz, short-to-mid range)
+- **Variant B:** 1D ToF sensor (STMicro VL53L5CX, 8×8 matrix, 6 m range, for foot-forward direction sensing)
+- **Variant C:** Short-range PIR (detection of warm bodies at ground level — choke-point style)
 
-### Skin Contact
-- Requires nickel-free alloys if metal backplate contacts skin.
-- Ventilation slots to reduce sweat accumulation.
+Note: anklet radar orientation is predominantly forward (in the direction of walking) and slightly upward (to detect approaching bodies before they reach the wearer's feet).
 
----
+### IMU
+- **Variant A:** Bosch BMI270 (consistent across all nodes)
+- **Variant B:** ST LSM6DSV (iNEMO 7-axis, built-in machine learning for step detection)
 
-## 4. Electrical Design
+IMU at ankle is the highest-dynamic-range node — it must handle impact (heel strike), rotation, and large angular excursions during normal walking.
 
-### Power Architecture
-- **Primary Power:** Single-cell LiPo.
-- **Charging:** Qi wireless charging or magnetic pogo-pin dock.
-- **Regulation:** Buck/boost for 3.3V and 1.8V rails.
-- **Battery Monitoring:** Fuel gauge IC for accurate % reporting to belt controller.
+### Haptic Actuator
+- **Variant A:** Precision Microdrives C10-100 LRA (as bracelet)
+- Haptic patterns at ankle are used for: directional alerts from below (ground-level approach), gait warnings (stumble pre-alert)
 
-### Interfaces
-| Interface | Function |
-| :--- | :--- |
-| **I²C** | IMU, Environmental sensors |
-| **UART / SPI** | ToF/LiDAR (depending on module) |
-| **GPIO** | Haptic driver (PWM), Button (reset/pairing) |
-| **RF Antenna** | Integrated ceramic or PCB trace antenna |
+### BAN Radio
+- BLE 5.3 via MCU
 
-### Debug
-- **Debug Header:** 4-pin (SWD, UART) for firmware flashing.
-- **Test Points:** Battery voltage, IMU interrupt.
+### Battery
+- LiPo 3.7V, 300–500 mAh (larger battery acceptable at ankle; less jewelry-constrained)
+- Target 48–72 hour runtime
 
 ---
 
-## 5. Firmware Interface
+## Gait Analysis Integration
 
-The firmware (`firmware/src/bin/anklet_left.rs`, `anklet_right.rs`) expects:
+The anklet IMU data is the primary input for `sentinel-body-frame::gait_analyzer`. Key gait features extracted from ankle IMU:
+- Step frequency (cadence)
+- Step regularity (gait coefficient of variation)
+- Heel-strike impact magnitude
+- Stride asymmetry (left vs. right foot comparison)
+- Pre-stumble signature: asymmetric loading + balance recovery micro-accelerations
 
-- **IMU:** High-ODR (> 200 Hz) for gait resolution.
-- **ToF:** Polling at 10–20 Hz during normal walk; burst at 50 Hz during sprint detection.
-- **Haptic:** Immediate response to `HapticCommand` from belt controller.
-
-**Key Functions:**
-- `poll_ground_clearance()` — Returns distance to floor.
-- `get_gait_event()` — Returns step/kick/stance phase.
-- `fire_haptic(pattern)` — Drives actuator.
-
----
-
-## 6. Calibration
-
-Anklet nodes require geometric calibration relative to the belt node:
-- **Neutral Pose Calibration:** Establishes local “down” vector.
-- **Walk-Through Calibration:** Trilaterates precise position on the leg relative to torso.
-
-No calibration data is stored on the node; it streams raw sensor data to the belt controller for fusion.
-
----
-
-## 7. Testing & Validation
-
-**Functional Tests:**
-- Ground detection accuracy (0.1–1.5m).
-- IMU range and noise floor.
-- Haptic intensity vs. comfort (must be felt through clothing).
-
-**Environmental Tests:**
-- IP67 water immersion.
-- Sweat/salt spray.
-- Impact testing (simulated kick against furniture).
-
-**Wear Testing:**
-- 24-hour wear comfort.
-- Snag resistance.
-- Charging reliability.
-
----
-
-## 8. Reference BOM (Example)
-
-| Component | Part Number (Example) | Qty | Notes |
-| :--- | :--- | :--- | :--- |
-| BLE SoC | nRF5340 | 1 | ARM Cortex-M33, BLE 5.2 |
-| IMU | ICM-42688-P | 1 | 6-axis, low noise |
-| ToF Sensor | VL53L5CX | 1 | 8x8 zone, up to 4m |
-| LRA Driver | DRV2605L | 1 | Haptic driver |
-| LRA Actuator | 0832 LRA | 1 | 8mm, linear resonant |
-| Fuel Gauge | MAX17048 | 1 | LiPo gauge |
-| Battery | 301230 | 1 | 120mAh LiPo pouch |
-| Antenna | Johanson 2450AT18A100 | 1 | 2.4GHz chip antenna |
-
----
-
-## 9. Design Notes
-
-- **Left vs Right:** Hardware is identical; firmware differentiation (`anklet_left` vs `anklet_right`) handles coordinate mapping.
-- **Dual-Purpose:** May act as a secondary receiver for body-area-network time sync.
-- **Synchronization:** Time sync with belt node is critical for gait phase accuracy; use BLE Connection Event timestamps.
+These features feed PentaTrack's `WearerSelfMotion` anomaly class.
