@@ -42,40 +42,50 @@ A **distributed wearable sensor mesh** worn on the body that continuously mainta
 
 Both modes run simultaneously when hardware supports it. Mode A always runs. Mode B activates based on hardware configuration and user preference.
 
-┌─────────▼────────────┐  ┌──────────▼──────────────┐  ┌─────────▼──────────┐
-│  Pendant / Necklace  │  │  Pendant / Necklace      │  │  Pendant Standard  │
-│  Node — Standard     │  │  Node — 360° Curved      │  │  Node — Medallion  │
-│  Flat pendant form   │  │  Curved flexible PCB     │  │  Premium housing   │
-│  mmWave+IMU+Acoustic │  │  8-camera 360°+mmWave    │  │  mmWave+IMU+Acous  │
-│  + opt-in cam        │  │  +IMU+Acoustic+Radar     │  │  +opt-in full cam  │
-└─────────────────────┘  └─────────────────────────┘  └────────────────────┘
-│
-┌─────────────┴──────────────┐
-│                            │
-┌────────────▼────────┐     ┌────────────▼────────┐
-│  Bracelet Left      │     │  Bracelet Right     │
-│  mmWave+IMU+Haptic  │     │  mmWave+IMU+Haptic  │
-│  + opt-in cam       │     │  + opt-in cam       │
-└─────────────────────┘     └────────────────────┘
-│
-┌──────────▼──────────┐
-│      Belt Node       │
-│  PRIMARY HUB         │
-│  Compute+Battery     │
-│  IMU(Torso Ref)      │
-│  mmWave(down)+Env    │
-│  App Server + API    │
-│  Recording Manager   │
-│  SLAM Processor      │
-└──────────┬───────────┘
-│
-┌─────────────┴──────────────┐
-│                            │
-┌────────────▼────────┐     ┌────────────▼────────┐
-│  Anklet Left        │     │  Anklet Right       │
-│  ToF/LiDAR+IMU+     │     │  ToF/LiDAR+IMU+     │
-│  Haptic+opt cam     │     │  Haptic+opt cam     │
-└─────────────────────┘     └────────────────────┘
+```
+                         ┌─────────────────────────────────┐
+                         │     Eyewear Node (Optional)      │
+                         │  Event Cam + IMU + optional cam  │
+                         │  forward hemisphere, head-stable  │
+                         └──────────────┬──────────────────┘
+                                        │
+             ┌──────────────────────────┼────────────────────────────┐
+             │                          │                            │
+   ┌─────────▼────────────┐  ┌──────────▼──────────────┐  ┌─────────▼──────────┐
+   │  Pendant / Necklace  │  │  Pendant / Necklace      │  │  Pendant Standard  │
+   │  Node — Standard     │  │  Node — 360° Curved      │  │  Node — Medallion  │
+   │  Flat pendant form   │  │  Curved flexible PCB     │  │  Premium housing   │
+   │  mmWave+IMU+Acoustic │  │  8-camera 360°+mmWave    │  │  mmWave+IMU+Acous  │
+   │  + opt-in cam        │  │  +IMU+Acoustic+Radar     │  │  +opt-in full cam  │
+   └─────────────────────┘  └─────────────────────────┘  └────────────────────┘
+                                        │
+                          ┌─────────────┴──────────────┐
+                          │                            │
+             ┌────────────▼────────┐     ┌────────────▼────────┐
+             │  Bracelet Left      │     │  Bracelet Right     │
+             │  mmWave+IMU+Haptic  │     │  mmWave+IMU+Haptic  │
+             │  + opt-in cam       │     │  + opt-in cam       │
+             └─────────────────────┘     └────────────────────┘
+                                        │
+                             ┌──────────▼──────────┐
+                             │      Belt Node       │
+                             │  PRIMARY HUB         │
+                             │  Compute+Battery     │
+                             │  IMU(Torso Ref)      │
+                             │  mmWave(down)+Env    │
+                             │  App Server + API    │
+                             │  Recording Manager   │
+                             │  SLAM Processor      │
+                             └──────────┬───────────┘
+                                        │
+                          ┌─────────────┴──────────────┐
+                          │                            │
+             ┌────────────▼────────┐     ┌────────────▼────────┐
+             │  Anklet Left        │     │  Anklet Right       │
+             │  ToF/LiDAR+IMU+     │     │  ToF/LiDAR+IMU+     │
+             │  Haptic+opt cam     │     │  Haptic+opt cam     │
+             └─────────────────────┘     └────────────────────┘
+```
 
 ---
 
@@ -223,16 +233,17 @@ SENTINEL-WEAR supports two simultaneous world model modes. Both are always avail
 **Technology stack:** OMNI-SENSE → PentaTrack → Body-frame stabilizer
 
 **What it produces:**
-
+```
 TrackedEntity {
-id
-position (x, y, z)     // in body frame
-velocity (vx, vy, vz)  // in body frame
-prediction_centers     // PentaTrack center field
-confidence
-classification_hint    // "human", "vehicle", "animal"
-anomaly_flags
+  id
+  position (x, y, z)     // in body frame
+  velocity (vx, vy, vz)  // in body frame
+  prediction_centers     // PentaTrack center field
+  confidence
+  classification_hint    // "human", "vehicle", "animal"
+  anomaly_flags
 }
+```
 
 **Visualization:** Radar-style body-centric display. Detected entities shown as blobs with velocity vectors and PentaTrack prediction arcs. Confidence shown as opacity/size. Alert zones shown as colored rings.
 
@@ -245,14 +256,15 @@ anomaly_flags
 **Technology stack:** LiDAR + cameras → SLAM → 3D mesh → Object recognition → Tracked entities overlay
 
 **What it produces:**
-
+```
 WorldMap {
-dense_3d_mesh         // full geometry of environment
-object_instances      // detected and classified objects
-tracked_entities      // same as Mode A but geometry-anchored
-camera_feeds          // per-camera streams with entity overlays
-stitched_panorama     // 360° view from pendant cameras (if 360° variant)
+  dense_3d_mesh         // full geometry of environment
+  object_instances      // detected and classified objects
+  tracked_entities      // same as Mode A but geometry-anchored
+  camera_feeds          // per-camera streams with entity overlays
+  stitched_panorama     // 360° view from pendant cameras (if 360° variant)
 }
+```
 
 **Visualization:** Full 3D world reconstruction. Users can fly-through the captured environment, review recordings in 3D context, overlay tracked entities on the geometry.
 
@@ -279,16 +291,17 @@ The 360° curved pendant is a signature variant of SENTINEL-WEAR. It transforms 
 The pendant hangs from a necklace chain. A curved flexible PCB (or rigid-flex hybrid) follows the arc of the pendant face. Camera modules are placed at regular angular intervals around the circumference.
 
 **Physical layout (example — 8-camera variant):**
-
-Top of pendant (worn at chest)
-┌────────────────────────────────┐
-│ 315°  0°  45°                  │  ← Front face cameras (3 cameras)
-│                                │
-│ 270°        90°                │  ← Side cameras (2 cameras)
-│                                │
-│ 225°  180°  135°               │  ← Rear / back cameras (3 cameras)
-└────────────────────────────────┘
-     Bottom of pendant
+```
+         Top of pendant (worn at chest)
+    ┌────────────────────────────────┐
+    │ 315°  0°  45°                  │  ← Front face cameras (3 cameras)
+    │                                │
+    │ 270°        90°                │  ← Side cameras (2 cameras)
+    │                                │
+    │ 225°  180°  135°               │  ← Rear / back cameras (3 cameras)
+    └────────────────────────────────┘
+         Bottom of pendant
+```
 
 **Camera spacing and overlap:**
 - 8 cameras at 45° intervals: each camera needs ~60° FoV for full overlap
@@ -333,6 +346,7 @@ This is equivalent capability to a stationary 360° security camera array — bu
 
 ## Sensor Stack
 
+```
 ┌──────────────────────────────────────────────────────────────────────────────┐
 │                        SENTINEL-WEAR Sensing Stack                           │
 ├──────────────────────────────────────────────────────────────────────────────┤
@@ -354,6 +368,7 @@ This is equivalent capability to a stationary 360° security camera array — bu
 │  Live streaming to companion app                                               │
 │  SLAM-ready visual odometry output                                             │
 └──────────────────────────────────────────────────────────────────────────────┘
+```
 
 ---
 
@@ -361,6 +376,7 @@ This is equivalent capability to a stationary 360° security camera array — bu
 
 ### Crate Structure
 
+```
 sentinel-wear/
 ├── crates/
 │   ├── sentinel-core/              # Shared types, config, node descriptors, events
@@ -412,27 +428,32 @@ sentinel-wear/
 ├── README.md
 ├── LICENSE
 └── CHANGELOG.md
+```
 
 ### Dependency Chain
 
+```
 OMNI-SENSE (sensor abstraction, physics, fusion)
-↓
+      ↓
 sentinel-core (shared types, events, config)
-↓
+      ↓
 sentinel-perception (node sensor pipelines)
 sentinel-body-frame (IMU fusion, coordinate transforms, calibration)
-↓
+      ↓
 sentinel-fusion (multi-node CI + JPDA)
 sentinel-slam (360° stitching, SLAM, dense world model)
-↓
+      ↓
 sentinel-tracking (PentaTrack bridge, world model integration)
 sentinel-extreme-velocity (high-speed prediction)
 sentinel-storage (recording management)
-↓
+      ↓
 sentinel-alerts (haptic routing, notification)
 sentinel-api (companion app server)
-↓
+      ↓
 sentinel-belt-controller (main binary)
+```
+
+---
 
 ## Time Synchronization
 
