@@ -14,7 +14,7 @@ The firmware is implemented in Rust using the `no_std` ecosystem. It is responsi
 - Power management (critical for 24–72 hour battery life).
 - Communicating with the belt controller over a low-power radio (BLE 5.x / UWB).
 
-**Scope Constraint:** This firmware is **sensing-and-information only**. It does not control actuators that act against external objects. The Identification Sensor driver respects the hardware kill-switch state.
+**Scope Constraint:** This firmware is **sensing-and-information only**. It does not control actuators that act against external objects. The Identification Sensor driver respects the hardware kill-switch state at all times. No override path exists in firmware.
 
 ---
 
@@ -86,19 +86,20 @@ Each node type is a separate binary (`src/bin/*.rs`), compiled with features ena
 **Role:** Primary compute unit, network coordinator, fusion hub.
 
 **Hardware:**
-- MCU: High-performance (Cortex-M7 or equivalent)
-- Sensors: mmWave radar (long-range), IMU (high-rate), Environmental.
+- MCU: High-performance (Cortex-M7 or equivalent Linux-capable SoM)
+- Sensors: mmWave radar (long-range, downward-facing), IMU (torso reference), Environmental.
 - Radio: BLE + optional Wi-Fi / Cellular for remote connectivity.
 
 **Firmware Responsibilities:**
 - Run full multi-modal fusion (`sentinel-fusion` crate, if MCU permits).
-- Route BAN traffic.
+- Route BAN traffic between all nodes.
 - Run PentaTrack (`sentinel-tracking` crate) for body-frame prediction.
-- Expose API for companion app.
+- Expose API for companion app (phone, PC).
 
 **Power Strategy:**
 - Highest power budget (largest battery).
 - Active fusion during movement; low-power presence monitoring otherwise.
+- Must support continuous operation of compute loop + BAN hub duties simultaneously.
 
 ---
 
@@ -111,15 +112,16 @@ Each node type is a separate binary (`src/bin/*.rs`), compiled with features ena
 - Sensors: mmWave radar, IMU, Microphone array, Identification sensor (opt-in).
 
 **Firmware Responsibilities:**
-- Detect upper-body threats.
-- Full-echo acoustic profiling.
+- Detect upper-body threats via radar.
+- Full-echo acoustic profiling and direction-of-arrival estimation.
 - **Identification Sensor Logic:**
-  - Check `KILL_SWITCH_GPIO` at boot. Halt if disabled.
-  - Process frames locally; transmit only classification tags.
+  - Check `KILL_SWITCH_GPIO` at boot. Return `SensorError::KillSwitchEngaged` and halt if disabled.
+  - Process identification frames locally; transmit only classification tags.
+  - Never buffer or transmit raw frames.
 
 **Power Strategy:**
 - Event-triggered activation for ID sensor.
-- Radar/IMU always-on (low duty cycle).
+- Radar/IMU always-on at low duty cycle.
 
 ---
 
@@ -133,12 +135,12 @@ Each node type is a separate binary (`src/bin/*.rs`), compiled with features ena
 
 **Firmware Responsibilities:**
 - Radar: Forearm hemisphere scanning.
-- IMU: Arm motion gesture detection.
-- Haptic: Execute patterns from belt controller commands.
+- IMU: Arm motion, gesture detection, body-frame pose contribution.
+- Haptic: Execute patterns received from belt controller `HapticCommand` messages.
 
 **Power Strategy:**
 - Aggressive sleep between polls.
-- Haptic peak current management.
+- Haptic peak current management (back-EMF sensing for LRA resonance tracking).
 
 ---
 
@@ -151,24 +153,25 @@ Each node type is a separate binary (`src/bin/*.rs`), compiled with features ena
 - Sensors: LiDAR/ToF (short-range), IMU, Haptic.
 
 **Firmware Responsibilities:**
-- ToF: Ground-level object detection.
-- IMU: Gait pattern analysis (step detection, stumble precursor).
-- Haptic: Directional alerts.
+- ToF: Ground-level object detection and floor-clearance measurement.
+- IMU: Gait pattern analysis (step detection, heel-strike, stumble precursor).
+- Haptic: Directional alerts from below.
 
 ---
 
 ### 4.5 Eyewear Node (`eyewear_node.rs`)
 
-**Role:** Forward field, high-speed event sensing.
+**Role:** Forward field, high-speed event sensing, head-pose estimation.
 
 **Hardware:**
-- MCU: Low-latency variant
+- MCU: Low-latency variant (Cortex-M4/M33)
 - Sensors: Event sensor, IMU.
 
 **Firmware Responsibilities:**
-- Event sensor processing (microsecond latency).
-- Spike-stream trajectory extraction.
+- Event sensor processing (microsecond latency spike-stream).
+- Spike-stream trajectory extraction (fast transient detection).
 - Forward-collision warning logic.
+- IMU: Head-pose estimation for body-frame separation of head vs. torso rotation.
 
 **Power Strategy:**
 - Event sensor is low-power but always active.
@@ -180,7 +183,7 @@ Each node type is a separate binary (`src/bin/*.rs`), compiled with features ena
 
 ### 5.1 HAL (Hardware Abstraction)
 
-The firmware relies on `embedded-hal` traits for portability.
+The firmware relies on `embedded-hal` traits for portability across MCU families.
 
 ```rust
 // Example driver instantiation
@@ -200,7 +203,7 @@ where
     pub fn new(spi: SPI, cs: CS) -> Self {
         Self { spi, cs }
     }
-    // ... implementation
+    // poll_presence(), poll_velocity(), configure_chirp() ...
 }
 ```
 
@@ -208,67 +211,108 @@ where
 
 Each driver implements a generic interface, allowing hardware substitution without changing logic.
 
-**`mmwave.rs`**:
+**`mmwave.rs`:**
 - Implements `poll_presence()` and `poll_velocity()`.
-- Handles chirp configuration (FMCW parameters).
+- Handles chirp configuration (FMCW parameters) via SPI/UART.
+- Micro-Doppler extraction for activity classification.
 
-**`imu.rs`**:
-- Polls at 200 Hz.
+**`imu.rs`:**
+- Polls at 200 Hz minimum.
 - Runs local Madgwick filter (from `omni-sense-physics`).
-- Outputs integrated orientation quaternions.
+- Outputs integrated orientation quaternions and gravity-compensated linear acceleration.
 
-**`identification_sensor.rs`**:
+**`acoustic.rs`:**
+- PDM/I2S read from microphone array.
+- Runs on-MCU delay-and-sum beamforming (from `omni-sense-physics::acoustic`).
+- Outputs direction-of-arrival and event-class metadata only.
+
+**`lidar_tof.rs`:**
+- UART/SPI interface to ToF module.
+- Outputs distance readings and 8×8 zone maps.
+
+**`event_sensor.rs`:**
+- High-bandwidth event stream ingestion via DMA.
+- Spatiotemporal clustering for motion event extraction.
+- Outputs `MotionEvent` metadata, not raw pixel events.
+
+**`haptic.rs`:**
+- I2C driver for DRV2605L haptic controller.
+- LRA resonance tracking via back-EMF feedback.
+- Pre-defined pattern library (directional alert patterns encoded as waveform indices).
+
+**`identification_sensor.rs`:**
 - **Must** read `KILL_SWITCH_PIN` on initialization.
-- Returns `IdentificationEvent`, never raw frames.
-- Encrypted storage of temporary embeddings (if local storage is present).
+- Returns `IdentificationEvent` only; never raw frames.
+- If kill-switch DISABLED: returns `Err(SensorError::KillSwitchEngaged)` immediately; does not proceed.
 
 ### 5.3 Logic Layer (`src/logic/`)
 
-**`body_frame_local.rs`**:
-- Integrates local IMU data.
-- Estimates node orientation relative to torso (requires calibration data).
+**`body_frame_local.rs`:**
+- Integrates local IMU data using Madgwick/Mahony filter.
+- Estimates node orientation relative to torso reference (requires calibration data from belt controller).
+- Provides `stabilize_detection()` to convert sensor-frame detections to torso-aligned frame.
 
-**`presence_detection.rs`**:
-- Radar presence polling.
-- Filtering for motion vs static clutter.
+**`presence_detection.rs`:**
+- Radar presence polling state machine.
+- Hysteresis filter to suppress clutter and spurious motion.
+- Outputs `PresenceEvent` with classification hint.
 
-**`power_management.rs`**:
-- Duty cycle control.
-- Sleep state entry/exit.
-- Battery level monitoring.
+**`power_management.rs`:**
+- Duty cycle control via RTOS task priorities.
+- Sleep state entry/exit based on interrupt activity.
+- Battery level monitoring via fuel gauge IC (I2C).
+- Reports `BatteryStatus` to belt controller on change and on request.
 
 ---
 
 ## 6. BAN Protocol Stack (`src/ban_radio/`)
 
 The Body Area Network protocol is optimized for:
-- Low latency (sub-millisecond event alerts).
-- Minimal data transmission (metadata only).
-- Secure pairing.
+- Low latency (sub-millisecond event alerts to haptic output).
+- Minimal data transmission (processed metadata, not raw sensor data).
+- Secure pairing (challenge-response at commissioning time).
 
 **Message Types:**
+
 ```rust
-enum SentinelBanMessage {
+pub enum SentinelBanMessage {
     NodeSensorData {
         timestamp_ms: u64,
-        radar_data: RadarMetadata, // Not raw chirp data
-        imu_quat: [f32; 4],
+        radar_metadata: RadarMetadata,   // Not raw chirp data
+        imu_quaternion: [f32; 4],
+        linear_accel: [f32; 3],
         node_id: NodeId,
     },
     HapticCommand {
         pattern: HapticPattern,
         duration_ms: u16,
+        intensity: u8,                   // 0–100
     },
     IdentificationResult {
         classification: ClassificationTag,
         confidence: f32,
+        node_id: NodeId,
     },
     GaitEvent {
-        event_type: GaitEventType, // Stumble, Fall, Sprint
+        event_type: GaitEventType,       // Step, Stumble, Fall, Sprint, Standing
+        confidence: f32,
+    },
+    AcousticEvent {
+        event_class: String,
+        direction_of_arrival: (f32, f32),
+        confidence: f32,
     },
     BatteryStatus {
         percent: u8,
         voltage_mv: u16,
+        charging: bool,
+    },
+    CalibrationCommand {
+        command: CalibrationPhase,
+    },
+    NodeHealth {
+        node_id: NodeId,
+        sensor_health: Vec<(String, SensorHealthStatus)>,
     },
 }
 ```
@@ -277,22 +321,29 @@ enum SentinelBanMessage {
 
 ## 7. Power Management Strategy
 
-The firmware uses a layered sleep strategy.
+The firmware uses a layered sleep strategy. Each node's power budget is determined by its battery capacity and sensor duty cycle.
 
 ### 7.1 Sleep States
-- **Active:** All peripherals on.
-- **Idle:** CPU halted, peripherals active.
-- **Standby:** RAM retained, radio off, sensor polling disabled.
+
+| State | CPU | Peripherals | Radio | Wake Source |
+|---|---|---|---|---|
+| **Active** | Full speed | All on | Connected | N/A |
+| **Idle** | WFI halted | Sensors active | Connected | Timer, interrupt |
+| **Standby** | Off (RAM retained) | Key sensors on | Advertising | PIR, radar, timer |
+| **Deep Sleep** | Off | RTC only | Off | External interrupt only |
 
 ### 7.2 Node Lifecycle
-1. **Boot & Init:** Peripherals up, check kill switches.
-2. **Calibration:** Await `CalibrationCommand` from belt.
-3. **Normal Operation:**
+
+1. **Boot & Init:** Peripherals up, check kill switches (identification nodes), read fuel gauge.
+2. **Pairing/Commission:** Await pairing command from belt; exchange security credentials.
+3. **Calibration:** Await `CalibrationCommand` from belt; stream high-rate IMU data for walk-through calibration.
+4. **Normal Operation:**
    - Timer wakes node every `T_poll`.
-   - Poll sensors.
-   - Transmit metadata.
-   - Enter Idle.
-4. **Event Mode:** Detection triggers immediate wake and transmit.
+   - Poll sensors per duty cycle configuration.
+   - Transmit metadata to belt controller.
+   - Enter Idle or Standby.
+5. **Event Mode:** Detection triggers immediate priority wake and transmit.
+6. **Low Battery:** Reduce sensor duty cycles; alert belt controller.
 
 ---
 
@@ -304,10 +355,7 @@ The firmware uses a layered sleep strategy.
 [workspace]
 resolver = "2"
 members = [
-    ".", # src/lib.rs
-    "src/bin/pendant_node",
-    "src/bin/belt_node",
-    # ... other binaries
+    ".",
 ]
 
 [package]
@@ -326,9 +374,6 @@ cortex-m = "0.7"
 cortex-m-rt = "0.7"
 embedded-hal = "1.0"
 panic-halt = "0.2"
-# Drivers
-mmwave-driver = { path = "src/drivers/mmwave" }
-# ... other deps
 
 [profile.dev]
 opt-level = 1
@@ -339,14 +384,44 @@ lto = false
 opt-level = "z"
 debug = false
 lto = true
+codegen-units = 1
+
+[[bin]]
+name = "pendant_node"
+path = "src/bin/pendant_node.rs"
+
+[[bin]]
+name = "bracelet_left"
+path = "src/bin/bracelet_left.rs"
+
+[[bin]]
+name = "bracelet_right"
+path = "src/bin/bracelet_right.rs"
+
+[[bin]]
+name = "belt_node"
+path = "src/bin/belt_node.rs"
+
+[[bin]]
+name = "anklet_left"
+path = "src/bin/anklet_left.rs"
+
+[[bin]]
+name = "anklet_right"
+path = "src/bin/anklet_right.rs"
+
+[[bin]]
+name = "eyewear_node"
+path = "src/bin/eyewear_node.rs"
 ```
 
 ### `build.rs`
 
 ```rust
 fn main() {
-    println!("cargo:rustc-link-arg=Tlink.x");
+    println!("cargo:rustc-link-arg=-Tlink.x");
     println!("cargo:rerun-if-changed=link.x");
+    println!("cargo:rerun-if-changed=memory.x");
 }
 ```
 
@@ -354,40 +429,45 @@ fn main() {
 
 ## 9. Identification Node Architecture
 
-The Identification Sensor is a separate "core" or isolated partition on the pendant node.
+The Identification Sensor is on a physically isolated sub-circuit of the pendant node.
 
-**Boot Sequence:**
-1. `main()` initializes GPIO.
-2. Reads `IDENTITY_KILL_SWITCH`.
+**Boot Sequence (mandatory — no bypass path):**
+1. `main()` initializes GPIO and RTC only.
+2. Reads `IDENTITY_KILL_SWITCH` GPIO pin.
 3. If `LOW` (disabled):
-   - Log disabled state.
-   - Loop forever (do not init camera).
+   - Logs `KillSwitchEngaged` to BAN radio.
+   - Loops forever — does NOT initialize camera, does NOT proceed.
 4. If `HIGH` (enabled):
-   - Init Identification Sensor.
-   - Await `EnableIdentification` command from belt.
+   - Initializes identification sensor driver.
+   - Awaits `EnableIdentification` command from belt controller before capturing any data.
+   - All frame capture → inference → result extraction occurs on-MCU.
+   - Only `IdentificationResult` messages transmit over BAN.
 
-**Data Flow:**
-- Sensor Frame → Local Compute → `IdentificationEvent` → BAN Transmit.
+**Absolute prohibitions (enforced architecturally, not by policy):**
+- Never write raw frames to external flash.
+- Never transmit raw frames over BAN or any other interface.
+- Never buffer frames in RAM after inference completes.
 
 ---
 
 ## 10. Debug & Test
 
 **On-Target Debug:**
-- SWD (Serial Wire Debug) via debug header.
-- RTT (Real Time Transfer) for logs.
+- SWD (Serial Wire Debug) via 4-pin debug header.
+- RTT (Real Time Transfer) for non-intrusive printf-style logs.
+- UART console at 115200 baud for boot diagnostics.
 
-**Host Simulation:**
-- Use `std` build of `src/lib.rs` for unit tests.
-- Mock `embedded-hal` implementations for CI testing.
+**Host Simulation (`std` build):**
+- `src/lib.rs` builds as `std` for host-side unit testing.
+- Mock `embedded-hal` implementations provided for CI.
+- Every driver has a `Simulated*` variant (mirrors OMNI-SENSE driver pattern).
 
 ---
 
 ## 11. Legal & Compliance
 
-- **Sensing-Only:** This firmware does not control effectors.
-- **Privacy:** Identification sensor is gated by hardware kill-switch.
-- **Export Control:** No controlled parameters.
-- **Radio:** FCC Part 15 (US), CE RED (EU) compliance required for radio usage.
-
----
+- **Sensing-Only:** This firmware does not control effectors. No actuator output path exists beyond the haptic motor (wearer-facing only).
+- **Privacy:** Identification sensor is gated by hardware kill-switch. No firmware bypass.
+- **Export Control:** No controlled sensing parameters. Simulation-only data paths.
+- **Radio:** FCC Part 15 (US), CE RED (EU) compliance required for BLE radio usage. Ensure radio module is certified.
+- **Battery:** Firmware must enforce voltage cutoffs (4.25 V overcharge, 3.0 V overdischarge). Hardware protections are primary; firmware is secondary enforcement layer.
