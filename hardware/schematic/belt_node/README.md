@@ -1,175 +1,174 @@
-# Belt Node — Primary Compute & Torso Reference
+# Belt Node — Primary Compute, Hub, and App Server
 
 **Project:** SENTINEL-WEAR
 **Node Position:** Waist belt / belt clip
-**Role:** Primary compute, battery hub, mesh gateway, downward sensing, torso reference frame
-**Status:** Reference Design
+**Primary Role:** Compute hub, battery hub, torso IMU reference, BAN coordinator, app server, recording manager
+**Status:** Reference Design — All Variants
 
 ---
 
 ## 1. Role in the Mesh
 
-The Belt Node is the central coordination unit of the SENTINEL-WEAR system. It acts as the **Body-Frame Origin** for the entire wearable mesh.
+The Belt Node is the central coordination unit of the SENTINEL-WEAR system.
 
 **Primary Functions:**
-- **Compute Hub:** Runs the main fusion algorithms (`sentinel-fusion`), predictive tracking (`pentatrack_bridge`), and system coordination.
-- **Torso Reference:** Provides the inertial reference frame for the body. The IMU on the belt node defines the "forward" and "up" vectors for the entire system. All other node orientations are expressed relative to this one.
-- **Sensing:** Equipped with its own sensors for independent downward and forward torso-level coverage.
-- **Communication Hub:** Manages the Body-Area Network (BAN), routing data from all other nodes.
+- **Compute Hub:** Runs `sentinel-fusion`, `sentinel-tracking` (PentaTrack bridge), `sentinel-slam` (Linux SoM variant), and all system coordination.
+- **Torso Reference:** The belt IMU defines the body-frame origin (+Y forward, +X right, +Z up). All other node orientations are expressed relative to this.
+- **BAN Hub:** Routes all inter-node BAN traffic. Receives detections, gait events, acoustic events, identification results, and recording notifications from all nodes.
+- **App Server:** Runs the embedded HTTP/WebSocket server for the SENTINEL-WEAR companion app. Serves the REST API, WebSocket event stream, and media streams over Wi-Fi or BLE. See `apps/README.md`.
+- **Recording Manager:** Manages recording lifecycle — capture, storage to SD card or internal flash, retention enforcement, and legal export. Receives `RecordingAvailable` events from all nodes; aggregates and indexes all recordings for companion app access.
+- **Sensing:** mmWave radar (downward, torso-level) for independent ground-plane and proximity coverage.
+- **SLAM Processor (Linux SoM variant):** Runs 360° panorama stitching from curved pendant cameras; runs SLAM pipeline from LiDAR and camera data for dense world model.
 
 ---
 
-## 2. Candidate Component Set (Test Variants — Not Locked)
+## 2. Compute Variants — All Supported
 
-### Primary Compute Module
+### Variant A — MCU (Research Minimum)
 
-- **Variant A:** Raspberry Pi Compute Module 4 (CM4) — quad-core Cortex-A72, 4–8 GB RAM, eMMC, Wi-Fi, BT. Runs full Linux + `sentinel-belt-controller` binary. Maximum capability.
-- **Variant B:** NXP i.MX 8M Plus — quad-core Cortex-A53 + Cortex-M7, NPU 2.3 TOPS, Linux/RTOS. Enables on-device neural inference for classification enhancement.
-- **Variant C:** Qualcomm SA8155P — automotive-grade SoC, Linux, high compute for real-time body-frame fusion at scale.
-- **Variant D:** ESP32-S3 + dedicated MCU for sensor handling — lower cost, embedded RTOS, limited classification capability. Suitable for minimal-node deployments.
+**MCU:** STM32H7 class (Cortex-M7, 480 MHz, FPU)
 
-**Selection criteria:** Ability to run Rust `sentinel-belt-controller` binary, RAM sufficient for full body-frame fusion (PentaTrack + 6 nodes), BAN radio integration, battery life impact.
+- Runs `sentinel-belt-controller` Rust binary on embedded RTOS.
+- Sufficient for: full body-frame fusion (6 nodes), PentaTrack, alert routing, BAN hub, basic recording management.
+- Not sufficient for: 360° stitching, dense SLAM, Linux app server.
+- Companion app: limited to BLE local connection; no Wi-Fi server.
+- ~2000 mAh battery.
 
-### MCU Co-Processor (Sensor Interface & Real-Time)
+**Use case:** Minimal viable system for research, low-power deployment.
 
-- **Variant A:** STM32U5 (handles sensor I/O, BAN radio, while primary compute handles fusion)
-- **Variant B:** nRF5340 network core (handles BAN protocol while app core handles fusion)
+### Variant B — Linux SoM (Full Capability)
 
-A co-processor pattern separates real-time sensor interrupt handling (sub-millisecond) from OS-level fusion processing. This is required when the primary compute runs a full OS with non-deterministic scheduling.
+**SoM:** Raspberry Pi Compute Module 4 (quad-core Cortex-A72, 4–8 GB RAM, eMMC, Wi-Fi, BT)
 
-### Downward-Facing mmWave Radar
+- Full Linux stack. Runs `sentinel-belt-controller` as a Rust native binary.
+- Runs all crates including `sentinel-slam` and `sentinel-api` (axum HTTP server).
+- Full companion app server: REST API, WebSocket, RTSP/H.264/360° media streams.
+- Handles 360° panorama stitching from curved pendant cameras.
+- SLAM-ready: runs ORB-SLAM3 or LIO-SAM with sufficient compute.
+- 5000–7000 mAh battery bank.
+- Thermal management required (see Section 6).
 
-- **Variant A:** TI IWR6843AOP (60 GHz, AOA capable, oriented downward from belt buckle)
+**Use case:** Full capability: SLAM, 360° stitching, recording management, companion app.
+
+### Variant C — High-Performance SoM
+
+**SoM:** NXP i.MX 8M Plus (quad-core Cortex-A53 + Cortex-M7, NPU 2.3 TOPS)
+
+- All Variant B capabilities.
+- NPU enables on-device neural classification for all nodes (centralizes inference, reduces node compute).
+- Better efficiency than Variant B for sustained workloads.
+- Built-in M7 co-processor handles real-time BAN protocol without interfering with A53 fusion workload.
+- 5000–7000 mAh battery bank.
+
+**Use case:** High-performance research deployment. GPU-like NPU for dense model inference.
+
+### Variant D — Minimal (ESP32)
+
+**MCU:** ESP32-S3
+
+- Lowest cost, highest power efficiency.
+- Integrated Wi-Fi and BLE.
+- Can serve a minimal HTTP API to companion app.
+- Limited to 2–3 node fusion (RAM constrained).
+- ~2000 mAh.
+
+**Use case:** Low-complexity single-node or dual-node deployments. Cost-optimized research.
+
+---
+
+## 3. MCU Co-Processor (Sensor Interface)
+
+For Variants B and C (Linux SoM), a co-processor handles real-time tasks that require deterministic scheduling:
+
+- **Variant A:** STM32U5 (sensor I/O, BAN radio coordination)
+- **Variant B:** nRF5340 network core (BAN protocol handler, BLE time-sync master)
+
+The co-processor pattern separates real-time interrupt handling from OS-level fusion processing.
+
+---
+
+## 4. Downward-Facing mmWave Radar
+
+- **Variant A:** TI IWR6843AOP (60 GHz, AOA, oriented downward from belt buckle)
 - **Variant B:** Acconeer XR112 (ultra-compact, lower power)
 
-**Coverage:** Detects objects approaching from below knee level, ground surface for gait analysis (combined with anklet IMUs), potential trip hazards.
-
-### IMU (Torso Reference — Most Critical)
-
-- **Variant A:** Bosch BMI270 (consistent with all other nodes)
-
-The belt IMU is the torso reference. All other node IMUs are expressed relative to this one in the body-frame coordinate system. Bias stability and noise density are the primary selection criteria.
-
-### BAN Radio (Body-Area Network Hub)
-
-- **Variant A:** Nordic nRF52840 co-processor (BLE 5.3 mesh, handles all inter-node communication)
-- **Variant B:** Decawave DW3000 UWB (for precise ranging and sub-ms sync — research variant)
-
-### External Interface
-
-| Interface | Purpose |
-|---|---|
-| Wi-Fi 6 (via compute module) | Companion app connection on home network |
-| Bluetooth 5.3 | Mobile companion app (when off home network) |
-| USB-C | PC companion app + charging |
-| LTE module (optional) | Emergency contact when off home network |
-
-**LTE Variant A:** Quectel EC21 (LTE Cat 1, UART, widely available)
-
-### Battery
-
-- Li-Ion 18650 cells (2× parallel for 5000–7000 mAh) — primary battery bank.
-- Powers: all belt-node compute + charges bracelet/anklet nodes via integrated charging ICs.
-- Target 8–24 hours runtime depending on activity level and sensing configuration.
+**Coverage:** Detects objects at ground level approaching the wearer's feet, ground surface for gait analysis cross-reference (combined with anklet IMUs), potential trip hazards.
 
 ---
 
-## 3. Hardware Architecture Block Diagram
+## 5. IMU (Torso Reference — Critical)
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                         Belt Node                           │
-│                                                             │
-│  ┌─────────────┐  ┌─────────────┐  ┌───────────────────┐   │
-│  │ mmWave Radar│  │  IMU        │  │ Environmental Sens│   │
-│  │ (downward)  │  │ (Torso Ref) │  │ (Temp/Press/VOC)  │   │
-│  └──────┬──────┘  └──────┬──────┘  └─────────┬─────────┘   │
-│         └────────────────┼──────────────────── ┘            │
-│                          │                                  │
-│                   ┌──────▼──────┐                           │
-│                   │  MCU Co-Proc│ (Real-time sensor I/O)    │
-│                   │  (nRF52840  │  + BAN Hub                │
-│                   │   / STM32U5)│                           │
-│                   └──────┬──────┘                           │
-│                          │ IPC (SPI/UART)                   │
-│                   ┌──────▼──────┐                           │
-│                   │ Primary     │ (Fusion, Tracking,        │
-│                   │ Compute SoC │  System Coordination)     │
-│                   │ (CM4 / iMX8)│                           │
-│                   └──────┬──────┘                           │
-│                          │                                  │
-│         ┌────────────────┼────────────┐                     │
-│         │                │            │                     │
-│  ┌──────▼──┐     ┌───────▼──┐  ┌─────▼────┐                │
-│  │ Wi-Fi / │     │  USB-C   │  │ Battery  │                │
-│  │  BLE /  │     │ Debug /  │  │ Mgmt     │                │
-│  │   LTE   │     │  Charge  │  │ (PMIC)   │                │
-│  └─────────┘     └──────────┘  └──────────┘                │
-│                                                             │
-└───────────────────────────┬─────────────────────────────────┘
-                            │
-                 BAN Network (to all other nodes)
-```
+- **Variant A:** Bosch BMI270 (6-axis, 0.1 mg noise density, consistent with all other nodes)
+- **Variant B:** TDK ICM-42688-P (0.07 mg noise density, smallest package)
+
+The belt IMU noise density and bias stability are the most critical parameters in the system. All other node orientations are expressed relative to this one. Higher quality here benefits the entire body-frame model.
 
 ---
 
-## 4. No Identification Layer
+## 6. External Interfaces
 
-The Belt Node does **not** carry an identification sensor (camera or biometric). Identification is the role of the Pendant Node (opt-in only). No hardware kill-switch for an identification sensor is required on this node.
-
----
-
-## 5. Power Management
-
-- **Battery:** Largest capacity in the system (worn at waist, hip support).
-- **Charging:** USB-C input (PD preferred for faster charging).
-- **Thermal:** Compute load generates heat. Enclosure must dissipate heat away from the body. Thermal vias under compute module; vented enclosure panels.
-- **Research Question:** Can the belt node power other nodes inductively? (Future iteration — not in scope for v1).
-
----
-
-## 6. Form Factor
-
-- **Enclosure:** Must be comfortable for continuous wear at the waist.
-- **Weight:** Higher tolerance than other nodes (up to ~200–300 g including battery bank).
-- **Attachment:** Belt clip or integrated into a belt buckle module.
-
----
-
-## 7. Design Variants
-
-| Variant | Processor | Primary Use Case |
+| Interface | Purpose | Variants |
 |---|---|---|
-| **Standard** | High-perf MCU (STM32H7) | Runs `sentinel-belt-controller` Rust binary, embedded RTOS |
-| **Advanced** | Linux SoM (CM4, iMX8) | Full Linux stack, heavy fusion models, companion app server |
-| **Minimal** | ESP32-S3 | Low-cost single-chip, minimal classification capability |
+| Wi-Fi 6 (via SoM) | Companion app over home network | B, C |
+| Bluetooth 5.3 | Mobile companion app (no Wi-Fi) | All |
+| USB-C | PC companion app + firmware update + charging | All |
+| LTE (optional module) | Emergency contact when off-network | B, C |
+| BAN Radio (nRF52840 / nRF5340) | Body-area network hub — all nodes | All |
+| SD card | Recording storage (high-capacity) | All (B/C preferred) |
 
 ---
 
-## 8. Interface Summary
+## 7. Thermal Management
 
-| Interface | Function | Notes |
-|---|---|---|
-| **BAN Radio (Hub)** | Mesh network coordinator | All nodes relay through belt |
-| **USB-C** | Power + Debug | Charging + firmware flashing |
-| **mmWave Radar** | Presence/velocity | Downward-facing torso-level |
-| **IMU** | Torso orientation | **Critical: defines body frame** |
-| **Environmental Sensor** | Context data | Temp/Pressure optional |
-| **Wi-Fi / BLE** | Companion app | Home network + mobile |
-| **LTE** | Emergency contact | Optional module |
+For Variants B and C running sustained compute (SLAM, stitching, app server):
+
+- **Thermal dissipation:** Design enclosure with venting or heatspreader for the SoM.
+- **Thermal pad:** Required under SoM PCB module footprint.
+- **Temperature monitoring:** NTC thermistor on enclosure interior wall; firmware limits compute if temperature exceeds 50°C.
+- **Duty cycling:** SLAM pipeline runs at reduced frame rate when thermal budget is tight.
 
 ---
 
-## 9. Directory Structure
+## 8. Battery Architecture
+
+- **Variant A, D:** Li-Ion 18650 × 1 (3500 mAh) — ~8–16 hours
+- **Variant B, C:** Li-Ion 18650 × 2 parallel (7000 mAh) — ~12–24 hours
+
+**Belt node can optionally power other nodes:**
+- Conductive traces through the belt (for nodes with belt-connection power rail).
+- This is an option for the curved 360° pendant (which has high power draw).
+
+---
+
+## 9. Form Factor
+
+- **Enclosure:** Belt buckle module or rear clip pack (both supported).
+- **Weight:** 100–300 g including battery bank. Worn at hip — weight supported by belt, not the wrist or neck.
+- **Attachment:** Removable belt clip or integrated into custom belt.
+- **Charging:** USB-C PD preferred for faster charging of high-capacity variants.
+
+---
+
+## 10. No Identification Layer on This Node
+
+The Belt Node does not carry an identification sensor. Identification is the role of the Pendant Node (user-configured). No camera hardware, no optional hardware switch, and no relevant firmware for identification are present on the belt.
+
+---
+
+## 11. Directory Structure
 
 ```
-hardware/schematic/belt_node/
-├── belt_node.kicad_pro
-├── belt_node.kicad_sch
-├── belt_node.kicad_pcb
-├── belt_node.kicad_prl
-├── fp-info-cache
-├── fp-lib-table
-├── sym-lib-table
+belt_node/
+├── variant_a_mcu/
+│   ├── belt_node_mcu.kicad_pro
+│   └── gerbers/
+├── variant_b_linux_som/
+│   ├── belt_node_cm4.kicad_pro
+│   └── gerbers/
+├── variant_c_imx8/
+│   └── gerbers/
+├── variant_d_esp32/
+│   └── gerbers/
+├── bom/
 └── README.md
 ```
