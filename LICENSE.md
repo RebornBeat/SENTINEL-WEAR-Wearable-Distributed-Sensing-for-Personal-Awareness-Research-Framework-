@@ -12,7 +12,7 @@ By contributing to this project, you agree that your contributions will be licen
 
 ## 1. MIT License (Code)
 
-Copyright (c) 2024 SENTINEL-WEAR Contributors
+Copyright (c) 2026 SENTINEL-WEAR Contributors
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
