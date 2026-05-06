@@ -1,282 +1,438 @@
-# Pendant Node — Hardware Schematic Reference Design
+# Pendant / Necklace Node — Hardware Schematic Reference Design
 
 **Project:** SENTINEL-WEAR
-**Node Position:** Neck/chest — worn as a necklace or pendant
-**Primary Role:** Primary Sensing & Identification Node (Upper Hemisphere Coverage)
-**Form Factor:** Pendant / Chest-Mounted
-**Status:** Reference Design v1.0
+**Node Position:** Neck/chest — worn as a necklace, pendant, or medallion
+**Primary Role:** Upper-hemisphere sensing, acoustic classification, visual identification (opt-in), 360° world capture (curved variant)
+**Status:** Reference Design v1.0 — Three Variants
 **License:** CERN-OHL-S v2
 
 ---
 
 ## 1. Overview
 
-The Pendant Node is the highest-information-value wearable node. Its chest/neck position gives it 360° azimuthal view of the environment at chest height — the most relevant sensing plane for approaching humans and objects. It also hosts:
-- The primary acoustic sensor for sound-event direction and material classification.
-- The optional identification sensor (visual/biometric — opt-in, kill-switch gated).
-- IMU for body-frame pose contribution and orientation reference.
+The Pendant Node is the highest-information-value wearable node. Its chest/neck position gives it 360° azimuthal view of the environment at chest height — the most relevant sensing plane for approaching humans and objects. It also hosts the primary acoustic sensor array and the optional visual identification capability.
+
+Three distinct physical variants exist, ranging from a minimal flat pendant to a fully custom curved 360° necklace with distributed cameras around the circumference. All variants share the same firmware foundation and BAN protocol, differing only in physical form and sensor population.
 
 ---
 
-## 2. Design Philosophy
+## 2. Variant A — Standard Flat Pendant
 
-### 2.1 Limitless Configuration
+### 2.1 Purpose
 
-This is a **reference design**, not a constraint. The architecture supports substitution of components to match research needs or available supply.
+Flat PCB in a medallion-style enclosure. Optimized for minimal size and weight while providing mmWave sensing, IMU, and acoustic classification. Optional single-camera forward-facing module. The most production-feasible variant for early research phases.
 
-- **Sensors:** The reference design uses a specified set, but the PCB layout accommodates alternative footprints where possible.
-- **Processing:** The MCU selection provides headroom for algorithm development.
-- **Connectivity:** No hardcoded connectivity assumptions. Supports local-only logging, BLE streaming, and Wi-Fi backhaul.
+### 2.2 Form Factor Constraints
 
-### 2.2 Sensing vs. Identification Layer Separation
+- PCB: maximum 50 mm × 50 mm
+- Populated height: < 15 mm
+- Weight target: 30–60 g total (including enclosure and battery)
+- Water resistance: IP54 minimum; IP67 target
+- Charging: USB-C or magnetic POGO pin
 
-The Pendant Node physically separates the **Sensing Layer** from the **Identification Layer**:
-- **Sensing Layer:** Always-on, privacy-preserving (mmWave, IMU, Acoustic). Powered by the main power rail.
-- **Identification Layer:** The camera/biometric module. **Controlled by a dedicated hardware kill switch (SW1).** The MCU firmware must read the kill-switch state at boot and halt execution if the switch is in the "disabled" position. No software override is permitted.
+### 2.3 Candidate Component Set (Test Variants — Not Locked)
 
----
-
-## 3. High-Level Block Diagram
-
-```
-[ Power Input / Charger ]
-          │
-    [ PMIC / Power Mgmt ]───────────────────┐
-          │                                 │
-          ▼                                 ▼
-[ Main MCU (nRF5340 / STM32H7) ]    [ Haptic Driver + LRA ]
-          │
-          ├───[ mmWave Radar (SPI/UART) ]
-          │
-          ├───[ IMU (SPI) ]
-          │
-          ├───[ Microphone Array (I2S/PDM) ]
-          │
-          ├───[ Environmental Sensors (I2C) ]
-          │
-          ├───[ Event Sensor (MIPI/SPI) ] (Optional)
-          │
-          └───[ Identification Module ]
-                       │
-                       ├───[ Camera Module (MIPI CSI / SPI) ]
-                       │
-                       └───[ Kill Switch SW1 (Physical DPST) ]
-```
-
----
-
-## 4. Candidate Component Set (Test Variants — Not Locked)
-
-All of the following are test candidates. Architecture explicitly supports testing multiple variants at each position. Substitutions are expected and encouraged.
-
-### 4.1 Microcontroller (MCU)
-
-**Reference Part:** Nordic Semiconductor nRF5340
-- **Architecture:** Dual-core Arm Cortex-M33 (Application Core 128 MHz + Network Core 64 MHz)
-- **Flash:** 1 MB Application Flash, 256 KB RAM
-- **Connectivity:** Bluetooth 5.1 / LE Audio, IEEE 802.15.4 (Thread), SPI, I2C, I2S, PDM, UART
-- **Reasoning:** Integrated BLE radio (critical for BAN), high-performance core for sensor fusion, ample memory for logging and algorithm development.
-
-**Alternative:** STM32WB55 (Cortex-M4 + M0+, BLE 5.0, ultra-low power, 2.4 GHz)
-
-### 4.2 Sensors
+#### MCU
+- **Variant A:** Nordic nRF5340 (dual Cortex-M33, BLE 5.3, 128 MHz application core)
+- **Variant B:** STM32WB55 (Cortex-M4 + M0+, BLE 5.0, ultra-low power)
+- **Variant C:** NXP i.MX RT1060 (Cortex-M7, 600 MHz — for heavier local inference)
 
 #### mmWave Radar
-- **Variant A:** Texas Instruments IWR6843ISK-ODS (60–64 GHz, on-chip antenna, FMCW, DSP/ARM integrated) — evaluation module for early testing
-- **Variant B:** Acconeer XR112 module (60 GHz, SPI, ultra-compact — preferred for wearable integration)
-- **Variant C:** Infineon BGT60ATR24C (60 GHz, MMIC, requires external antenna design)
+- **Variant A:** TI IWR6843ISK-ODS (60–64 GHz, evaluation module, initial research)
+- **Variant B:** Acconeer XR112 module (60 GHz, SPI, ultra-compact — preferred for wearable)
+- **Variant C:** Infineon BGT60ATR24C (60 GHz, MMIC, requires custom antenna layout)
+- **Variant D:** Acconeer XM125 (60 GHz, ultra-long range, UART)
 
-**Interface:** SPI + GPIOs (Data Ready, Reset). Power: 3.3 V.
-**Coverage:** Antenna oriented to maximize forward and lateral hemisphere coverage from chest position.
+Coverage: Antenna oriented for forward and lateral hemisphere from chest position.
 
 #### IMU
-- **Variant A:** Bosch BMI270 (6-axis, OIS, ultra-low power, SPI/I2C, 0.1 mg noise density) — preferred for noise floor
-- **Variant B:** TDK InvenSense ICM-42688-P (6-axis, 0.07 mg noise density, SPI, FIFO, on-chip FIFO)
-- **Variant C:** ST LSM6DSV (6-axis + temperature, iNEMO 7-axis, built-in step/gesture, SPI)
-
-**Selection criteria:** Noise density and bias stability are primary. IMU is critical for body-frame drift correction.
+- **Variant A:** Bosch BMI270 (6-axis, 0.1 mg noise density, SPI — preferred)
+- **Variant B:** TDK ICM-42688-P (6-axis, 0.07 mg noise density, smallest package)
+- **Variant C:** ST LSM6DSV (6-axis + temperature, iNEMO, built-in step/gesture)
+- **Variant D:** Bosch BMI323 (6-axis, ultra-low power, advanced motion processing)
 
 #### Microphone Array (Acoustic)
-- **Variant A:** Knowles SPH0645LM4H × 3 (I2S PDM MEMS, compact, 65 dBA SNR) — 3-element planar array
-- **Variant B:** ST MP23DB01HP × 4 (analog MEMS, 64 dBA SNR) — 4-element tetrahedral on flexible PCB
-- **Variant C:** InvenSense ICS-40180 × 4 (analog MEMS, 65 dBA SNR)
+- **3-element planar (compact):**
+  - Knowles SPH0645LM4H × 3 (I2S PDM, 65 dBA SNR)
+- **4-element tetrahedral (3D DOA):**
+  - ST MP23DB01HP × 4 (analog MEMS, 64 dBA SNR) on flexible PCB
+  - InvenSense ICS-40180 × 4 (analog, 65 dBA SNR)
+- **6-element (high resolution):**
+  - Any above × 6 in circular or tetrahedral arrangement
 
-**Array geometry:** Planar 3-element for space-constrained pendants; tetrahedral 4-element for better 3D direction-of-arrival in larger variants.
+#### Optional Camera Module (Opt-In Single Camera)
+- **Variant A:** OmniVision OV2640 (2 MP, MIPI/DVP, small package)
+- **Variant B:** Sony IMX307 (2 MP, low light, MIPI CSI-2)
+- **Variant C:** Arducam IMX219 (8 MP, CSI, configurable optics)
+- **Variant D:** OmniVision OV5640 (5 MP, autofocus)
+- **Variant E:** HiMax HM01B0 (QVGA, 2.1 mW, ultra-low power, on-chip first-stage detection)
+- **Variant F:** Luxonis OAK-D Lite (stereo + neural inference on-module)
 
-#### Environmental Sensors (Optional)
-- **Variant A:** Bosch BME680 (Temperature, Humidity, Pressure, Gas/VOC — single chip, I2C/SPI)
-- **Variant B:** Bosch BME688 (as BME680 + AI gas sensing)
+#### Optional Visual Identification Modules (All Research Variants)
+- **Visual (depth):** Intel RealSense D415 (stereo depth + RGB)
+- **Thermal:** FLIR Lepton 3.5 (160×120 thermal imaging)
+- **Near-IR structured light:** Dot-projector + IR camera
+- **Audio biometric:** Sensory TrulyHandsfree (voice recognition pre-processor)
+- **Fingerprint:** Synaptics FS4500 (fixed entry points only)
 
-#### Event Sensor (Optional / Advanced Research)
-- **Variant A:** Prophesee Metavision EVK3 (640×480, USB, lower power)
-- **Variant B:** Sony IMX637 sensor on custom carrier — research variant
+#### Environmental Sensor
+- **Variant A:** Bosch BME688 (temperature, humidity, pressure, VOC — single chip)
+- **Variant B:** Sensirion SEN55 (PM2.5, PM10, temperature, humidity, VOC, NOx)
 
-Routes high-speed differential pairs to a connector for external module. Base design includes pads for these traces.
+#### Optional Event Sensor (Fast Transient)
+- **Variant A:** Prophesee Metavision EVK3 (640×480, USB)
+- **Variant B:** iniVation DAVIS346 (346×260, combined frame+events)
 
-### 4.3 Identification Module (Opt-In Layer — All Variants Under Research)
+#### Power Management
+- **PMIC:** Nordic nPM1300 (charging, regulated rails, fuel gauge)
+- **Battery:** LiPo 3.7V, 150–300 mAh (jewelry weight budget)
+  - 150 mAh: ultra-thin 1.5 mm profile
+  - 200 mAh: standard pendant thickness
+  - 300 mAh: bulkier pendant, 5 mm profile
 
-None mandated. **Kill switch is mandatory before any variant can be activated.**
+#### Privacy Controls (All User-Configured — None Mandatory)
+- **Hardware power switch (optional):** User-installed switch cutting V_CAM power rail. Recommended for users wanting guaranteed physical camera disable without software interaction.
+- **Software scheduling:** Camera driver disabled in firmware when schedule policy says inactive.
+- **Activity-trigger mode:** Camera only activates on belt controller detection event.
+- **Always-on mode:** Continuous recording per storage configuration.
+- **Any combination** of the above is supported.
 
-**Visual (Camera-Based):**
-- **Variant A:** OmniVision OV2640 (2 MP, small package, MIPI/DVP) — camera-based face detection
-- **Variant B:** Arducam IMX219 (8 MP, CSI, configurable wide or narrow angle)
-- **Variant C:** Luxonis OAK-D Lite (stereo + neural inference on-module) — self-contained identification
+No specific privacy control method is mandated by the architecture. Users select what suits their use case and jurisdiction.
 
-**Ultra-Low Power:**
-- **Variant D:** HiMax HM01B0 (QVGA, 2.1 mW, ultra-low power) — minimal footprint, first-stage detection on-chip
+#### BAN Radio
+- **Primary:** BLE 5.3 via MCU integrated radio
+- **Optional:** Qorvo DW3000 UWB (precision time-sync + ranging)
 
-**Non-Visual:**
-- **Variant E:** None — pendant in audio-only identification mode via voice biometrics
-
-**Interface:** MIPI CSI-2 (direct to MCU) or SPI for lower-res modules.
-
-### 4.4 Power Management
-
-**Reference Part:** Nordic nPM1300 PMIC
-- Battery charging (LiPo/Li-Ion), Buck regulators, Fuel Gauge.
-- **Battery:** LiPo 3.7V, 150–300 mAh (jewelry weight budget: 10–15 g battery maximum).
-- **Variants under test:** 150 mAh (ultra-thin, 1.5 mm), 200 mAh (standard pendant), 300 mAh (bulkier, 5 mm).
-- **Charging:** USB-C or magnetic POGO pin.
-
-### 4.5 Haptic
-
-**Reference Part:** TI DRV2605L Haptic Driver (I2C, waveform library, auto-resonance detection).
-**Actuator:** LRA (Linear Resonant Actuator), 10 mm diameter.
-
-### 4.6 BAN Radio
-
-- **Variant A:** BLE 5.3 via nRF5340 network core (if MCU is nRF5340)
-- **Variant B:** UWB via Qorvo DW3000 (sub-ns timestamping, <1 m ranging accuracy, higher power — research variant)
+#### Haptic Actuator
+- TI DRV2605L (I2C, waveform library)
+- LRA actuator: Precision Microdrives C10-100 (10 mm diameter, 150 Hz)
 
 ---
 
-## 5. Pin Mapping & Configuration
+## 3. Variant B — 360° Curved Pendant / Necklace
 
-*(Reference mapping for nRF5340. Adjust for your specific MCU selection and pin availability.)*
+### 3.1 Purpose
 
-### 5.1 mmWave Radar
+This is the signature advanced variant of SENTINEL-WEAR. A custom curved PCB (flexible or rigid-flex) follows the arc of the necklace pendant, with camera modules distributed at regular angular intervals around the circumference. Together they produce continuous 360° visual coverage from the chest level — functionally equivalent to a full 360° security camera array, but mobile, wearable, and body-frame aware.
 
-| Signal | nRF5340 Pin | Description |
+### 3.2 Physical Architecture
+
+The necklace hangs from a chain or cable at chest level. The pendant element is an arc-shaped PCB spanning approximately 180°–360° of the pendant face, depending on the chosen camera coverage configuration.
+
+**Coverage configurations:**
+
+| Config | Cameras | Angular Spacing | Individual Camera FoV Needed | Coverage |
+|---|---|---|---|---|
+| Minimal | 4 | 90° | ≥ 100° | 360° with overlap |
+| Standard | 6 | 60° | ≥ 70° | 360° with good overlap |
+| Dense | 8 | 45° | ≥ 55° | 360° with excellent overlap |
+| Ultra | 12 | 30° | ≥ 40° | 360° with maximum overlap |
+
+**Front-face cameras:** Face outward from pendant surface (forward hemisphere).
+**Side cameras:** Face perpendicular to pendant surface (lateral coverage).
+**Rear cameras:** Face inward toward the wearer's body or outward from pendant rear (rear hemisphere). The rear-facing cameras may be placed on the chain/cable element rather than the pendant face.
+
+### 3.3 PCB Construction
+
+**Option A — Rigid-Flex**
+- Rigid PCB segments for component placement
+- Flexible bridges between segments
+- Best for component density and reliability
+- Segments: each camera module on its own rigid section
+- Flex bridges: power, data, and timing lines between segments
+- Total PCB arc: 8–12 rigid segments connected by 7–11 flex bridges
+
+**Option B — Fully Flexible PCB**
+- Single substrate, multi-layer flexible PCB
+- Better conformability
+- More fragile — vibration and flex fatigue concerns
+- Suitable for low-bend-cycle deployment
+
+**Option C — Modular Array**
+- Individual camera modules on small PCBs
+- Connected by thin flexible ribbon cables
+- Maximum repairability and component substitution
+- Mechanically simpler but bulkier per connection
+
+**Option D — Curved Rigid PCB with Formed Enclosure**
+- Standard rigid PCB bent during enclosure assembly (only viable for gentle curves)
+- Simpler to manufacture
+- Only for radii > 30 mm
+
+### 3.4 Candidate Camera Modules (Per-Position)
+
+Each position on the arc receives one camera module. All modules at all positions are the same type for simplest BOM, though mixed configurations are supported.
+
+- **Standard Quality:** OV2640 (2 MP, DVP, tiny), OV5640 (5 MP, autofocus)
+- **Low-Light:** Sony IMX307 or IMX327 (2 MP, excellent low-light sensitivity)
+- **High Resolution:** Sony IMX219 (8 MP) or IMX477 (12 MP)
+- **Ultra-Low Power:** HiMax HM01B0 (QVGA, first-stage detection on-chip) — for less active positions
+- **Wide-Angle:** Custom wide-angle lens fitted to any above module
+- **Fisheye:** 180° fisheye lens on any above module for maximum per-camera coverage
+
+Recommended for initial research: OmniVision OV2640 at all positions (affordable, small, adequate quality) with fisheye or wide-angle optics.
+
+### 3.5 Image Processing Pipeline — 360° Stitching
+
+**Level A — Belt Node Processing (recommended for v1)**
+- Raw streams from all cameras transmitted over high-bandwidth link to belt node
+- Belt node Linux SoM runs stitching software
+- Real-time 360° equirectangular output at reduced resolution
+- Full-resolution recorded to SD card on belt
+
+**Level B — Distributed On-Pendant ISP**
+- Dedicated ISP chip on pendant (e.g., Allwinner V851 or similar)
+- Performs stitching from all camera streams locally
+- Compressed 360° stream transmitted to belt node
+- Reduces belt node compute requirement
+- Increases pendant power and complexity
+
+**Level C — Companion App Processing**
+- All raw streams transmitted to companion app over Wi-Fi
+- App performs stitching at full quality
+- Enables highest quality output
+- Requires continuous Wi-Fi connectivity
+
+**Level D — Cloud Offload (Optional)**
+- Compressed streams transmitted to user's own server or cloud storage
+- Stitching and object recognition in cloud
+- Highest quality, highest latency, requires internet
+
+### 3.6 Image Stitching Software
+
+**On belt node (Linux SoM):**
+- `ffmpeg` with overlay filter for initial calibration
+- OpenCV-based custom stitcher (per-camera calibration + homography + blend)
+- Or: commercial 360° stitching SDK (Kandao, Insta360 developer tools)
+
+**On companion app:**
+- GPU-accelerated stitching via Metal (iOS) / Vulkan (Android) / DirectX/Metal (desktop)
+
+**Calibration:** Per-camera intrinsics + extrinsics. Calibrated once at manufacturing/setup via standard checkerboard pattern at multiple distances. Calibration data stored on belt node SD card.
+
+### 3.7 SLAM Integration
+
+The 360° pendant is an extremely powerful SLAM sensor when combined with the belt node:
+
+- 360° visual input from pendant cameras provides omnidirectional visual odometry
+- Combined with anklet ToF ground-plane data and belt IMU torso reference
+- Produces a continuously-updated 3D map anchored to the body
+- As the wearer moves, the entire visited environment is mapped in 3D
+- The SLAM map persists as a record of everywhere the wearer has been with the geometry of those spaces
+
+**SLAM stack:**
+- **Backend:** ORB-SLAM3 (CPU-based) or RTK-SLAM (GPU if available)
+- **Visual odometry:** Per-camera feature tracking + fusion across all 360° cameras
+- **Dense reconstruction:** OpenMVS or similar for mesh generation from keyframes
+- **Object recognition:** YOLO or equivalent running on belt node or companion app
+
+### 3.8 360° Pendant MCU Architecture
+
+Due to the data bandwidth from multiple cameras, the 360° pendant requires a more capable compute structure:
+
+**Option A — Single High-Performance MCU**
+- NXP i.MX 8M Mini (quad-core Cortex-A53 + Cortex-M4)
+- Handles: camera multiplexing, compression, IMU, radar, BAN radio coordination
+- Transmits compressed streams to belt node
+
+**Option B — Two-MCU Split**
+- Sensing MCU: nRF5340 (BAN radio, IMU, radar, acoustic)
+- Vision MCU: NXP i.MX RT1060 or Allwinner V851 (camera multiplexing, initial compression)
+- Vision MCU connected to belt node via USB 3.x or high-speed proprietary link
+
+**Option C — Minimal (research phase)**
+- nRF5340 handles radar, IMU, acoustic, BAN
+- Each camera connected directly to belt node via separate USB cables (inelegant but functional for initial testing)
+
+### 3.9 Power Architecture
+
+- **Total draw (all cameras active, radar + IMU):** 2–5 W
+- **Battery:** 400–1000 mAh distributed in pendant arc or in a separate battery module worn on chain/cable
+- **Charging:** Magnetic pogo-pin dock or Qi wireless
+- **Expected runtime (full 360° active):** 2–4 hours (research phase); 6–12 hours (optimized production)
+
+### 3.10 Physical Design Notes
+
+**Jewelry aesthetic:**
+- The curved PCB arc is enclosed in a jewelry-grade curved enclosure
+- Front face: optical-quality transparent polymer or sapphire glass at each camera position
+- Frame: titanium, surgical steel, or anodized aluminum
+- Camera apertures: tiny holes or transparent windows aligned to each camera module
+- Back surface: medical-grade silicone for comfort against skin
+
+**Weight distribution:**
+- Larger battery modules can be distributed to the chain/cable for balance
+- The pendant itself should weigh no more than the heaviest luxury pendant jewelry (~50–80 g)
+- Battery extension module on the chain adds capacity without increasing pendant weight
+
+**Necklace chain:**
+- Standard jewelry chain or cable provides mechanical support
+- Optional: conductive traces embedded in cable for power routing from belt battery bank
+
+---
+
+## 4. Variant C — Medallion (Premium / High-Capability)
+
+### 4.1 Purpose
+
+A larger, thicker pendant form factor. Sacrifices minimum form factor for maximum sensing capability. Suitable for use cases where sensing quality is the top priority.
+
+### 4.2 Key Differentiators from Variant A
+
+- **Larger PCB:** 60 mm × 60 mm or circular 60 mm diameter
+- **Thicker:** 15–25 mm populated height
+- **Higher compute:** NXP i.MX 8M Plus or Raspberry Pi Zero 2W class
+- **More microphones:** 6-element tetrahedral array (highest acoustic precision)
+- **Higher-resolution camera:** Up to 12 MP with autofocus
+- **Integrated short-range structured light or depth sensor:** True 3D face recognition capability
+- **Higher-capacity battery:** 800–1500 mAh
+- **Weight:** 80–150 g (still within pendant comfort range for most users)
+
+### 4.3 Use Case
+
+Medical monitoring, high-fidelity research collection, extreme accuracy requirements, users who prioritize capability over minimalism.
+
+---
+
+## 5. Interface Summary (All Variants)
+
+### Common Interfaces
+
+| Interface | Signal Names | Connection |
 |---|---|---|
-| `SPI_MOSI` | P1.00 | SPI Master Out Slave In |
-| `SPI_MISO` | P1.01 | SPI Master In Slave Out |
-| `SPI_CLK` | P1.02 | SPI Clock |
-| `RADAR_CS` | P1.03 | Chip Select |
-| `RADAR_RST` | P1.04 | Reset |
-| `RADAR_IRQ` | P1.05 | Data Ready Interrupt |
+| **mmWave Radar** | `SPI_MOSI/MISO/CLK`, `RADAR_CS`, `RADAR_IRQ` | SPI + GPIO |
+| **IMU** | `IMU_CS`, `IMU_INT` | SPI (shared bus, separate CS) |
+| **Microphone Array** | `PDM_CLK`, `PDM_DATA` or `I2S_BCLK/WS/DATA` | PDM or I2S |
+| **Environmental** | `ENV_SDA`, `ENV_SCL` | I2C |
+| **BAN Radio** | Integrated in MCU or separate module | SPI/UART |
+| **Charging** | `CHRG_IN+`, `CHRG_IN-` | POGO or USB-C |
+| **Debug** | `SWD_CLK`, `SWD_DIO`, `UART_TX` | 4-pin header |
 
-### 5.2 IMU
+### Variant A / C Additional
 
-| Signal | nRF5340 Pin | Description |
+| Interface | Signal Names | Connection |
 |---|---|---|
-| `IMU_CS` | P1.06 | Chip Select |
-| `IMU_INT` | P1.07 | Data Ready Interrupt |
-| `SPI_MOSI` | P1.00 | (Shared with Radar — different CS) |
-| `SPI_MISO` | P1.01 | (Shared) |
-| `SPI_CLK` | P1.02 | (Shared) |
+| **Camera (single)** | `MIPI_CLK+/-`, `MIPI_D0+/-` | MIPI CSI-2 |
+| **Optional privacy switch** | `CAM_PWR_SW` | GPIO + MOSFET |
+| **Haptic** | `HAPTIC_SDA`, `HAPTIC_SCL` | I2C (DRV2605L) |
 
-### 5.3 Acoustic (PDM Microphones)
+### Variant B Additional (360° Curved)
 
-| Signal | nRF5340 Pin | Description |
+| Interface | Signal Names | Connection |
 |---|---|---|
-| `PDM_CLK` | P1.08 | Clock Output |
-| `PDM_DATA` | P1.09 | Data Input |
-
-### 5.4 Identification Module (Camera)
-
-| Signal | nRF5340 Pin | Description |
-|---|---|---|
-| `CAM_PWDN` | P1.10 | Power Down Control |
-| `KILL_SW` | P1.11 | **Hardware Kill Switch Input (Read at boot — no bypass)** |
-| `MIPI_CSI_CLK+` | Dedicated | High-speed differential pair |
-| `MIPI_CSI_D0+` | Dedicated | High-speed differential pair |
-
-### 5.5 Power, Haptics, & Debug
-
-| Signal | nRF5340 Pin | Description |
-|---|---|---|
-| `HAPTIC_I2C_SDA` | P1.13 | I2C Data (DRV2605L) |
-| `HAPTIC_I2C_SCL` | P1.14 | I2C Clock |
-| `ENV_I2C_SDA` | P1.13 | I2C Data (shared bus, diff address) |
-| `SWD_CLK` | P0.18 | Debug |
-| `SWD_DIO` | P0.20 | Debug |
-| `USB_D+` | Dedicated | USB Data+ |
-| `USB_D-` | Dedicated | USB Data- |
-| `BAT_SENSE` | AIN0 | Battery Voltage (via resistor divider) |
+| **Camera × N (per module)** | `CAM_n_D0+/-`, `CAM_n_CLK+/-` | MIPI CSI-2 per camera |
+| **Camera sync** | `CAM_FSYNC` (hardware sync line) | GPIO broadcast to all cameras |
+| **Vision MCU** | `USB3_TX/RX` or `SPI_HS` | High-speed link to belt node |
+| **Belt power** | `V_BELT_IN` | High-current from belt battery bank (optional) |
 
 ---
 
 ## 6. Power Architecture
 
-### 6.1 Power Rails
+### Variant A
 
 | Rail | Voltage | Source | Usage |
 |---|---|---|---|
-| `V_BAT` | 3.7V – 4.2V | Direct battery | Radio PA, haptic driver |
-| `V_SYS` | 3.3V | nPM1300 regulated | MCU, Sensors, Radio |
-| `V_MCU` | 3.3V | Regulated | Always-on |
-| `V_RADAR` | 3.3V | Always-on rail | Primary sensing |
-| `V_CAM` | 3.3V or 2.8V | **Switched via MOSFET + Kill Switch** | Identification module only |
+| `V_BAT` | 3.7–4.2V | LiPo | Radio PA, haptic peak |
+| `V_SYS` | 3.3V | nPM1300 | MCU, sensors, radio |
+| `V_CAM` | 3.3V or 2.8V | Switched | Camera (user-configured enable) |
 
-### 6.2 Kill Switch Logic — CRITICAL
+### Variant B (360°)
 
-The Kill Switch (`SW1`) is a physical DPST (Double Pole Single Throw) slider switch.
-
-- **Pole 1:** Breaks the `V_CAM` power rail to the identification module.
-- **Pole 2:** Breaks the MIPI data lines (analog switch in series) OR connects a `KILL_SW` GPIO signal high/low.
-
-**Firmware Requirement (no override):**
-- The MCU **must** read the `KILL_SW` GPIO pin as the first action after GPIO init.
-- If `KILL_SW` is LOW (switch DISABLED), the MCU **must halt** and **never attempt to power on, initialize, or communicate with the Identification Module.**
-- The only permitted activity in this state: respond to BAN health queries with `KillSwitchEngaged` status.
-- The slider position must be visible to the wearer without removing the pendant.
-
-**Circuit note:** A second GPIO path reads MOSFET drain to confirm `V_CAM` is truly zero even if the MCU GPIO misreads. Hardware confirmation is belt-and-suspenders.
+| Rail | Voltage | Source | Usage |
+|---|---|---|---|
+| `V_BAT` | 3.7–4.2V | LiPo | Power to all subsystems |
+| `V_SYS` | 3.3V | Regulated | MCU, radar, IMU |
+| `V_CAMS` | 3.3V / 2.8V | Regulated, ganged | All camera modules (single rail for all) |
+| `V_ISP` | 1.8V / 1.0V | Vision MCU supply | Vision MCU core/IO |
+| `V_EXT` | 5V | From belt node (optional) | Belt-supplied power for extended runtime |
 
 ---
 
-## 7. Form Factor Constraints
+## 7. 360° Pendant Manufacturing Notes
 
-- **Dimensions:** Maximum 50 mm × 50 mm (excluding mounting lugs/loop).
-- **Height:** < 15 mm populated height.
-- **Weight target:** 30–60 g total including enclosure, battery, and all electronics.
-- **Enclosure:** Jewelry-grade pendant enclosure. CAD files in `/mechanical/cad/pendant_enclosure.step`.
-- **Water resistance:** IP54 minimum (sweat, rain); IP67 target (hand washing, brief immersion).
-- **Charging:** USB-C or magnetic POGO pin (compatible with jewelry wear and water resistance).
+**PCB Stack (rigid-flex, 8-camera variant):**
+- 8 rigid sections: each ~15 mm × 20 mm carrying one camera module
+- 7 flex bridges: each ~5 mm × 30 mm carrying power + 4-lane MIPI CSI-2 + sync
+- Total arc length: ~180 mm (matching pendant circumference)
+- Minimum bend radius for flex sections: 3 mm (polyimide substrate)
 
----
+**Impedance control:**
+- MIPI CSI-2 differential pairs: 100 Ω ± 10%
+- Match length within 2 mil on all MIPI pairs
+- Ground plane continuity must be maintained across all flex bridges
 
-## 8. Bill of Materials Overview
-
-A full BOM is available in `hardware/bom/pendant_node_bom.csv`.
-
-**Key Components Summary:**
-
-| Ref | Part | Description |
-|---|---|---|
-| U1 | nRF5340-QKAA-AB0R | MCU |
-| U2 | IWR6843ISK-ODS | mmWave Radar |
-| U3 | ICM-42688-P | IMU |
-| U4 | nPM1300 | PMIC |
-| U5 | DRV2605L | Haptic Driver |
-| MK1–MK3 | SPH0645LM4H-B | Microphones (PDM) |
-| J1 | USB-C Connector | Power + Debug |
-| SW1 | DPST Slide Switch | **Hardware Kill Switch — mandatory** |
+**Assembly:**
+- Rigid sections assembled independently on standard SMT line
+- Flex bridges attached after individual section test
+- Full flex assembly requires specialized bending fixtures
 
 ---
 
-## 9. Layout Guidelines
+## 8. Directory Structure
 
-1. **RF Section:** mmWave radar antenna area must be free of copper and components on all layers. Follow manufacturer keep-out strictly.
-2. **High-Speed Signals:** Route MIPI CSI traces with controlled impedance (100 Ω differential). Length-match the pairs within 5 mil.
-3. **Power Decoupling:** Place 100 nF decoupling capacitors within 0.5 mm of all power pins. Add 10 µF bulk near PMIC.
-4. **Grounding:** Solid ground plane on Layer 2. Star grounding prevents digital noise from coupling into mic analog inputs.
-5. **Kill Switch Routing:** Route `V_CAM` rail through the switch contacts. Do not allow any alternative path that bypasses the switch.
+```
+hardware/schematic/pendant_node/
+├── variant_a_standard/
+│   ├── pendant_node_std.kicad_pro
+│   ├── pendant_node_std.kicad_sch
+│   ├── pendant_node_std.kicad_pcb
+│   └── gerbers/
+├── variant_b_360_curved/
+│   ├── pendant_360_segment.kicad_pro     # Single arc segment (replicated ×N)
+│   ├── pendant_360_flex_bridge.kicad_sch
+│   ├── pendant_360_full_assembly.kicad_pcb
+│   ├── pendant_360_stitching_config.json # Camera calibration and stitching params
+│   └── gerbers/
+├── variant_c_medallion/
+│   ├── medallion_node.kicad_pro
+│   ├── medallion_node.kicad_sch
+│   ├── medallion_node.kicad_pcb
+│   └── gerbers/
+├── bom/
+│   ├── pendant_std_bom.csv
+│   ├── pendant_360_bom.csv
+│   └── medallion_bom.csv
+├── 3d_models/
+│   ├── pendant_std_enclosure.step
+│   ├── pendant_360_arc_segment.step
+│   ├── pendant_360_full_assembly.step
+│   └── medallion_enclosure.step
+└── README.md
+```
 
 ---
 
-## 10. Hardware Revision History
+## 9. Testing Strategy
 
-| Rev | Date | Description |
-|---|---|---|
-| v1.0 | 2026-05-05 | Initial reference design release |
+### All Variants
+
+1. Power-on self-test
+2. IMU initialization and calibration check
+3. Radar detection at 0.5 m test target
+4. BAN radio connectivity
+5. Battery and charging circuit verification
+
+### Variant A / C Camera Testing
+
+1. Camera initialization response
+2. Image quality check (resolution, focus at 1 m)
+3. Privacy control verification per configured method (if hardware switch present: confirmed zero current to camera; if software mode: confirmed camera inactive)
+
+### Variant B 360° Camera Testing
+
+1. All N cameras initialize and produce frames
+2. Hardware sync signal verified across all cameras
+3. Stitching quality check: straight line continuity across camera boundaries
+4. Full 360° recording test: 30-second clip stored to SD card
+5. Companion app stream: live 360° view accessible within 5 seconds of activation
+
+---
+
+## 10. Related Documentation
+
+- **Firmware:** `firmware/src/bin/pendant_node.rs`
+- **Body-Frame Theory:** `docs/theory/body_coordinate_fusion.md`
+- **360° Stitching:** `crates/sentinel-slam/src/stitching.rs` (when implemented)
+- **SLAM Architecture:** `crates/sentinel-slam/src/lib.rs`
+- **Hardware Config:** `hardware/hardware_config.md`
