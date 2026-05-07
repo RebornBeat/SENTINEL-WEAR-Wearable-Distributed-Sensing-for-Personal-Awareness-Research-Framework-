@@ -65,14 +65,15 @@ Both modes run simultaneously when hardware supports it. Mode A always runs. Mod
              │  Bracelet Left      │     │  Bracelet Right     │
              │  mmWave+IMU+Haptic  │     │  mmWave+IMU+Haptic  │
              │  + opt-in cam       │     │  + opt-in cam       │
-             └─────────────────────┘     └────────────────────┘
+             └─────────────────────┘     └─────────────────────┘
                                         │
                              ┌──────────▼──────────┐
                              │      Belt Node       │
                              │  PRIMARY HUB         │
+                             │  SOLE EXTERNAL GATEWAY│
                              │  Compute+Battery     │
                              │  IMU(Torso Ref)      │
-                             │  mmWave(down)+Env    │
+                             │  WiFi+Cellular+BAN   │
                              │  App Server + API    │
                              │  Recording Manager   │
                              │  SLAM Processor      │
@@ -84,30 +85,209 @@ Both modes run simultaneously when hardware supports it. Mode A always runs. Mod
              │  Anklet Left        │     │  Anklet Right       │
              │  ToF/LiDAR+IMU+     │     │  ToF/LiDAR+IMU+     │
              │  Haptic+opt cam     │     │  Haptic+opt cam     │
-             └─────────────────────┘     └────────────────────┘
+             └─────────────────────┘     └─────────────────────┘
 ```
 
 ---
 
-## Innovation Landscape
+## Connectivity Architecture — The Belt Node as Sole External Gateway
 
-### Wearable Distributed Sensing Gap
+### Critical Architectural Principle
 
-The wearable sensing market is dominated by single-node devices (smartwatches, fitness trackers) that treat the body as a point. SENTINEL-WEAR sits in an under-published research space: distributed sensing across multiple body-worn nodes that together treat the body as a *volume* with surrounding context.
+**Only the Belt Node connects to external networks.** This is not a configuration choice — it is an architectural constraint enforced at both hardware and firmware levels.
 
-**Architectural focus areas:**
+**All other nodes (pendant, bracelets, anklets, eyewear) communicate exclusively via Body-Area Network (BAN) to the belt node.** They have no WiFi, no cellular, and no direct connection to the companion app.
 
-1. **Distributed Body-Frame Fusion.** Multiple nodes (neck, wrists, waist, ankles, optionally eyewear) cooperate to maintain a unified body-frame coordinate system. Each node's local detections are transformed into the shared frame and fused. PentaTrack provides the predictive center-field output.
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                     SENTINEL-WEAR Connectivity Model                         │
+│                                                                              │
+│  Pendant ──┐                                                                 │
+│  Bracelets─┤                                                                 │
+│  Anklets───┼── BAN (BLE 5.x / UWB) ──► Belt Node ──► WiFi ──► Companion App │
+│  Eyewear───┘                               │                                 │
+│                                            ├──► Cellular ──► Remote App     │
+│                                            └──► BLE direct ──► Local App   │
+│                                                                              │
+│  ⚠️  BELT NODE IS THE ONLY NODE WITH WiFi / Cellular / BLE (to external)    │
+│  ⚠️  ALL OTHER NODES = BAN ONLY (BLE/UWB to belt, nothing external)          │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
 
-2. **Body-Frame Drift Correction.** The wearer is in motion — walking, turning, gesturing. The multi-IMU stack subtracts wearer motion from sensor observations so that "threat approaching from behind" reflects actual approach, not an artifact of the wearer turning. See `docs/theory/body_coordinate_fusion.md`.
+### Why This Architecture?
 
-3. **Dual World Model Architecture.** Both sparse probabilistic tracking and dense SLAM reconstruction are first-class outputs. Neither is a compromise. Hardware configuration determines which is active.
+| Constraint | WiFi on Wearable | BLE on Wearable | UWB on Wearable |
+|------------|------------------|-----------------|-----------------|
+| **Power** | 300-1000+ mW active | 5-15 mW active | 50-150 mW active |
+| **Heat** | Significant thermal load | Minimal | Moderate |
+| **Form factor impact** | Requires larger battery, antenna space | Minimal | Moderate |
+| **Wearability** | Breaks jewelry form factor | Preserves jewelry form | Compatible |
+| **Determinism** | Variable latency, contention | Consistent, schedulable | Excellent timing |
 
-4. **360° Curved Pendant Design.** A custom flexible or rigid-flex PCB pendant with cameras distributed at angular positions around the necklace circumference, producing continuous 360° visual coverage from the chest position.
+**Conclusion:** WiFi on jewelry-form-factor nodes destroys the form factor through power/thermal/size requirements. BLE and UWB are the only viable BAN technologies for jewelry-scale wearables.
 
-5. **Sensing-Physics Research at Body-Frame Timescales.** Characterizes what sensor architectures can and cannot detect at the relevant timescales for fast-moving objects. Upstream-of-actuation sensing physics research.
+### Transport Layer Hierarchy
 
-6. **Full Data Ownership.** Users own all data captured by their system. Raw recordings, compressed clips, metadata — all configurable. All storage local by default. Streaming to app on user request. Legal export with cryptographic integrity chain.
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         BANDWIDTH HIERARCHY                                  │
+├─────────────────────────────────────────────────────────────────────────────┤
+│  BLE 5.x (500 Kbps - 2 Mbps practical)                                       │
+│  → Control plane (configuration, commands, health)                          │
+│  → Metadata (detections, IMU orientation, classification results)            │
+│  → Low-bandwidth sensor data                                                 │
+│  → Always-on, lowest power (5-15 mW)                                         │
+│  → Present on ALL nodes                                                      │
+├─────────────────────────────────────────────────────────────────────────────┤
+│  UWB (4-6 Mbps sustained, 6.8 Mbps peak)                                     │
+│  → Precision time synchronization (sub-nanosecond)                          │
+│  → Precision ranging (cm-level distance between nodes)                       │
+│  → Moderate-bandwidth continuous (single camera at 720p-1080p)               │
+│  → High-bandwidth BURSTS (compressed clips, short recordings)                │
+│  → 360° at 2K-2.5K resolution                                                │
+│  → Optional on nodes, enabled per configuration                              │
+│  → Power: 50-150 mW when active                                              │
+├─────────────────────────────────────────────────────────────────────────────┤
+│  WiFi (50-300+ Mbps) — BELT NODE ONLY                                        │
+│  → High-bandwidth continuous (4K 360° live streaming)                        │
+│  → Multiple simultaneous camera streams                                      │
+│  → SLAM data transfer                                                        │
+│  → Primary path to companion app                                             │
+│  → Power: 300-500 mW when streaming                                          │
+├─────────────────────────────────────────────────────────────────────────────┤
+│  Cellular (Variable by module) — BELT NODE ONLY                              │
+│  → LTE Cat 1: 5-10 Mbps — alerts, metadata, compressed clips                │
+│  → LTE Cat 4: 50-150 Mbps — good for moderate streaming                     │
+│  → 5G: 100-1000+ Mbps — suitable for 360° live relay                         │
+│  → Used when WiFi unavailable (remote access, away from home)               │
+│  → Power: 150-1200 mW depending on module and activity                       │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Supported Cellular Modules (Belt Node Only)
+
+| Module | Technology | Speed | Interface | Use Case |
+|--------|------------|-------|-----------|----------|
+| Quectel EC21 | LTE Cat 1 | 5-10 Mbps | UART | Alerts, metadata only |
+| Quectel EC25 | LTE Cat 4 | 50-150 Mbps | UART/USB | Compressed video clips |
+| Quectel RM502Q-AE | 5G Sub-6GHz | 100+ Mbps | USB 3.x | Live 360° streaming |
+| Quectel EG912Y-GL | LTE Cat 12 | 300+ Mbps | USB | Multi-carrier, eSIM |
+
+### Configuration (`sentinel-wear.toml`)
+
+```toml
+[connectivity]
+# WiFi is primary connection to companion app
+wifi_enabled = true
+wifi_ssid = "YourHomeNetwork"
+wifi_password = ""  # Set at runtime for security
+
+# Cellular is optional for remote access
+[connectivity.cellular]
+enabled = false
+sim_type = "nano_sim"            # "nano_sim" | "esim"
+apn = "your.carrier.apn"
+fallback_to_wifi = true          # Prefer WiFi when available
+always_on_cellular = false       # Keep cellular active even with WiFi
+alert_via_cellular = true        # Send critical alerts via cellular
+stream_via_cellular = false      # Stream video over cellular (data cost)
+emergency_contact = ""           # Phone/endpoint for emergency alerts
+
+# BAN configuration
+[connectivity.ban]
+primary = "ble"                  # "ble" | "uwb" | "hybrid"
+ble_connection_interval_ms = 30
+uwb_enabled = false              # Enable UWB on nodes that support it
+uwb_role = "timing_and_ranging"  # "timing_only" | "timing_and_ranging" | "full_bandwidth"
+```
+
+---
+
+## Body-Area Network (BAN) Architecture
+
+### BLE Scheduling and Determinism
+
+**Problem:** If all nodes transmit simultaneously over BLE, collisions and latency spikes occur.
+
+**Solution — Time-slotted scheduling:**
+
+```
+BLE Connection Event (30 ms interval)
+├── Slot 0-2 ms:   Belt → Pendant (sync, commands)
+├── Slot 2-5 ms:   Pendant → Belt (sensor data, detections)
+├── Slot 5-7 ms:   Belt → Anklet L (sync)
+├── Slot 7-10 ms:  Anklet L → Belt (gait event)
+├── Slot 10-12 ms: Belt → Anklet R (sync)
+├── Slot 12-15 ms: Anklet R → Belt (gait event)
+├── Slot 15-17 ms: Belt → Bracelet L (sync)
+├── Slot 17-20 ms: Bracelet L → Belt (detection)
+├── Slot 20-22 ms: Belt → Bracelet R (sync)
+├── Slot 22-25 ms: Bracelet R → Belt (detection)
+├── Slot 25-30 ms: Reserved (alerts, retransmits, eyewear)
+```
+
+**Connection interval tradeoffs:**
+
+| Interval | Latency | Power per Node | Use Case |
+|----------|---------|----------------|----------|
+| 7.5 ms | ~5 ms | 15-20 mW | Real-time motion capture |
+| 15 ms | ~10 ms | 10-15 mW | Active gait monitoring |
+| 30 ms | ~20 ms | 5-10 mW | Standard operation |
+| 100 ms | ~60 ms | 2-5 mW | Power saving |
+| 1000 ms | ~600 ms | <1 mW | Sleep mode |
+
+### Node Priority for Bandwidth Allocation
+
+| Priority | Node | Reason |
+|----------|------|--------|
+| 1 (Highest) | Belt IMU | Torso reference, all body-frame fusion depends on it |
+| 2 | Anklets | Gait phase timing, critical for stumble detection |
+| 3 | Pendant | Primary sensing, highest information value |
+| 4 | Bracelets | Secondary sensing |
+| 5 (Lowest) | Eyewear | Optional, supplementary |
+
+### UWB Role Configuration
+
+UWB can be enabled on any node with UWB hardware. Roles:
+
+**Timing Only:**
+- Sub-nanosecond time synchronization
+- cm-level ranging between nodes
+- Minimal data transfer
+- Lowest power UWB mode
+
+**Timing + Burst Data:**
+- All timing capabilities
+- Short bursts of compressed data
+- Useful for: compressed camera clips, sensor data bursts
+- Power: activated only during burst
+
+**Full Bandwidth:**
+- All timing capabilities
+- Sustained streaming up to 5-6 Mbps
+- Useful for: single camera streaming, 360° at 2K resolution
+- Power: higher sustained draw (50-150 mW)
+
+### RF Coexistence
+
+**Frequency bands in use:**
+- BLE: 2.4 GHz ISM band
+- WiFi: 2.4 GHz and 5 GHz bands
+- UWB: 3.1-10.6 GHz
+- mmWave radar: 60 GHz
+- Cellular: Various (700 MHz - 3.5 GHz, 24-47 GHz for 5G mmWave)
+
+**Coexistence strategies:**
+1. **WiFi prefers 5 GHz band** — eliminates 2.4 GHz conflict with BLE
+2. **Antenna separation on belt** — Cellular/WiFi antennas on exterior, BLE/UWB on interior
+3. **Time-division multiplexing** — When 2.4 GHz WiFi must be used, coordinate timing with BLE
+4. **UWB is in separate band** — No conflict with BLE or WiFi
+
+```toml
+[rf_coexistence]
+wifi_prefer_5ghz = true        # Strongly recommended
+ble_wifi_timeshare = false     # Set true if 2.4 GHz WiFi must be used
+```
 
 ---
 
@@ -115,31 +295,26 @@ The wearable sensing market is dominated by single-node devices (smartwatches, f
 
 ### Pendant / Necklace Node
 
-The highest-information-value node. Three variants:
+The highest-information-value node. Hardware variants and configuration options:
+
+#### Hardware Variants (Require Different PCB)
 
 **Variant A — Standard Flat Pendant**
 - Flat PCB in a medallion-style enclosure
 - mmWave radar (forward + lateral hemisphere)
 - IMU (body-frame orientation)
 - Microphone array (acoustic DOA + material classification)
-- Optional camera module (single forward-facing, opt-in)
-- Optional environmental sensors
 - 150–300 mAh battery
 - ~30–60 g total
 
-**Variant B — 360° Curved Pendant / Necklace**
+**Variant B — 360° Curved Pendant** (Treat as separate node type for engineering purposes)
 - Custom curved flexible PCB or rigid-flex following the necklace arc
-- 4–8 camera modules distributed around the circumference at angular positions
-- Example: 8 cameras at 0°, 45°, 90°, 135°, 180°, 225°, 270°, 315° (full 360°)
-- Image stitching on-pendant (dedicated ISP) or offloaded to belt node
-- mmWave radar arrays at multiple angular positions for 360° radar coverage
-- Distributed IMU array for orientation at each arc segment
-- Distributed microphone array matching camera arc
-- Sub-pendant accessory form factor — hangs naturally, fits into jewelry aesthetic
-- Custom PCB production required (flexible substrate, custom component placement)
-- Belt node handles full 360° video stitching, SLAM integration, and recording
-- This variant enables true 360° continuous world capture from chest-level position
-- 400–800 mAh battery (distributed in pendant arc or separate battery module)
+- 4–8 camera modules distributed around the circumference
+- mmWave radar arrays at multiple angular positions
+- Distributed IMU and microphone arrays
+- 400–800 mAh battery (distributed in pendant arc or separate module)
+- Wired internal camera bus to central vision processor
+- ~50–120 g depending on camera count and battery
 
 **Variant C — Medallion (Premium)**
 - Larger pendant with thicker profile
@@ -150,77 +325,206 @@ The highest-information-value node. Three variants:
 - High-capacity battery (up to 1000 mAh)
 - ~70–120 g total
 
+**Variant D — Tactical/Extended Runtime**
+- Larger profile (70-80 mm)
+- Integrated battery pack in enclosure (up to 2000 mAh)
+- External belt power input (conductive chain or cable)
+- Purpose: All-day 360° operation for security personnel, journalists
+- Thermal: Active cooling vents, larger surface area
+
+**Variant E — Event-Enhanced**
+- 360° camera array (standard or reduced count)
+- Plus dedicated event cameras for extreme velocity detection
+- Purpose: Users who need the full sensing stack including fast transient detection
+- Configuration: Standard cameras for visual + event cameras for Doppler-triggered capture
+
+#### Configuration Options (Same PCB, Different Population/Settings)
+
+For Standard and Medallion variants, these are configuration options (not separate hardware variants):
+
+| Option | Values | Notes |
+|--------|--------|-------|
+| Camera | None / Forward-facing / Wide-angle | PCB has footprint, module optionally populated |
+| UWB | Disabled / Enabled | PCB has footprint, module optionally populated |
+| Battery | 150 / 250 / 400 mAh | Same enclosure, different cell |
+| Microphones | 3 / 4 / 6 element | Same footprint, different population |
+
+For 360° Curved variant, these are configuration options:
+
+| Option | Values | Notes |
+|--------|--------|-------|
+| Camera count | 4 / 6 / 8 | Same PCB design, different population |
+| Camera resolution | QVGA / VGA / 720p / 1080p | Same cameras, different mode |
+| Stitching location | Pendant / Belt | Vision processor location |
+| UWB | Disabled / Enabled | For bandwidth augmentation |
+
 ### Bracelet Node (×2)
 
 Forearm-hemisphere sensing and directional haptic output.
 
-**Variant A — Minimal**
-- Acconeer XR112 radar + BMI270 IMU + LRA haptic
-- nRF5340 MCU
-- Ultra-slim band (< 3 mm z-profile)
+#### Hardware Design
 
-**Variant B — Standard**
-- mmWave radar + IMU + LRA haptic
-- Optional short-range ToF
-- 200–400 mAh
+**Single PCB design** supports all variants via configuration:
 
-**Variant C — Extended**
-- mmWave radar + IMU + LRA haptic
-- Single outward-facing camera (opt-in, user-configured)
-- Larger battery
-- Useful for gesture recognition and arm-direction visual awareness
+- nRF5340 or STM32WB55 MCU
+- Acconeer XR112 mmWave radar (outward-facing)
+- BMI270 or ICM-42688-P IMU
+- TI DRV2605L haptic driver + LRA actuator
+- 150-500 mAh battery (configurable)
+- Optional UWB footprint (DW3000)
+- Optional camera footprint
+
+#### Configuration Options
+
+| Option | Values | Notes |
+|--------|--------|-------|
+| Sensor set | Minimal / Standard / Extended | Different component population |
+| Camera | None / Forward-facing | Optional module |
+| UWB | Disabled / Enabled | Optional module |
+| Battery | 150 / 250 / 400 mAh | Different cell sizes |
 
 ### Belt Node
 
-Primary compute, battery hub, torso reference, app server.
+Primary compute, battery hub, torso reference, **sole external network gateway**, app server.
 
-**Variant A — MCU (Minimal)**
-- STM32H7 class
+#### Hardware Variants (Different Compute Platforms)
+
+**Variant A — MCU-Class (Minimal)**
+- STM32H7 class (Cortex-M7, 480 MHz)
 - Local embedded RTOS
 - Runs `sentinel-belt-controller` Rust binary
-- ~2000 mAh
+- Sparse tracking only (no SLAM)
+- ~2000 mAh battery
+- 12-20 hour runtime (sparse mode)
+- Suitable for: basic presence awareness, low-cost deployment
 
-**Variant B — Linux SoM (Full)**
+**Variant B — Linux SoM (Standard)**
 - Raspberry Pi CM4 / NXP i.MX 8M Plus
 - Full Linux stack
 - SLAM processing, companion app server, recording management
-- 5000–7000 mAh battery bank
+- 5000-7000 mAh battery bank
+- 10-15 hour runtime (sparse mode), 5-8 hours (full active)
+- Suitable for: full capability deployment, 360° processing
 
 **Variant C — High-Performance**
-- Qualcomm SA8155P or equivalent
+- Qualcomm SA8155P or NXP i.MX 8M Plus with NPU
 - GPU-class inference for dense SLAM
-- Can run neural 360° stitching from pendant cameras locally
-- Enables full offline dense world reconstruction without companion app
+- Neural 360° stitching from pendant cameras locally
+- Enables full offline dense world reconstruction
+- 5000-7000 mAh battery bank
+- 5-8 hours runtime (full active)
+- Suitable for: production deployment, maximum capability
+
+**Variant D — ESP32-Based**
+- ESP32-S3 with integrated WiFi
+- Lowest cost option
+- WiFi used only as BAN transport to edge-like processing
+- Sufficient for 2-3 nodes
+- ~2000 mAh battery
+- Suitable for: minimal deployment, research
+
+**Variant E — Extended Runtime/Hot-Swappable**
+- Dual battery bays with hot-swap capability
+- User can swap one battery while running on the other
+- 24/7 operation for security, shift workers
+- Larger form factor (belt pack style)
+- Suitable for: professional/continuous use
+
+#### Configuration Options (All Variants)
+
+| Option | Values | Notes |
+|--------|--------|-------|
+| Cellular module | None / LTE Cat 1 / LTE Cat 4 / 5G | Based on remote access needs |
+| UWB | Disabled / Enabled | For precision timing with nodes |
+| WiFi band preference | 5 GHz preferred / 2.4 GHz only | For RF coexistence |
+| Battery capacity | 2000 / 5000 / 7000 mAh | Based on variant and enclosure |
+
+#### Power Budget Analysis
+
+| Mode | Functions Active | Power Draw | Runtime (5000 mAh) |
+|------|------------------|------------|-------------------|
+| Minimal (MCU-only) | BAN hub, sparse tracking | ~500 mW | ~37 hours |
+| Standard (Linux) | BAN hub, sparse tracking, WiFi idle | ~1.4 W | ~13 hours |
+| Full Active | BAN hub, dense SLAM, 360° stitching, streaming | ~4.5 W | ~4 hours |
+| Remote Streaming | Full Active + cellular | ~5.3 W | ~3.5 hours |
+
+#### Thermal Management
+
+Linux SoM variants generate 3-7 W under full load. Requirements:
+- Thermal pad under SoM footprint
+- Vented or heat-spreader enclosure
+- NTC thermistor for thermal monitoring
+- Firmware throttles SLAM frame rate above 40°C enclosure temperature
+- Maximum skin-contact temperature: 42°C
 
 ### Anklet Node (×2)
 
 Ground-plane sensing, gait analysis, lower-hemisphere coverage.
 
-**Variant A — Minimal**
-- VL53L5CX ToF + BMI270 IMU + LRA haptic
-- 300 mAh
+#### Hardware Design
 
-**Variant B — Extended**
-- Short-range LiDAR + mmWave + IMU + haptic
-- Optional small downward-facing camera (ground-level obstacle detection)
-- 500 mAh
+**Single PCB design** supports all variants via configuration:
+
+- Nordic nRF5340 or Silicon Labs EFR32BG24 MCU
+- VL53L5CX ToF or short-range LiDAR
+- BMI270 IMU (high dynamic range for heel-strike)
+- TI DRV2605L haptic driver + LRA
+- 300-500 mAh battery
+- Optional UWB footprint
+- Optional small camera footprint
+
+#### Configuration Options
+
+| Option | Values | Notes |
+|--------|--------|-------|
+| Sensor set | Minimal (ToF only) / Extended (ToF + LiDAR + mmWave) | Different population |
+| Camera | None / Downward-facing | Ground obstacle detection |
+| UWB | Disabled / Enabled | Recommended for gait sync |
+| Battery | 300 / 500 mAh | Different cell sizes |
+
+#### Gait Analysis Capabilities
+
+- Step frequency (cadence)
+- Step regularity (gait coefficient of variation)
+- Heel-strike impact magnitude (requires high-dynamic-range IMU, 5-10 g)
+- Stride asymmetry (left vs. right comparison)
+- Pre-stumble signature detection
+- Gait phase: stance / swing / strike / push at ≥ 200 Hz
 
 ### Eyewear Node (Optional)
 
 Head-stabilized forward-hemisphere sensing.
 
-**Variant A — Event-Only**
-- Event camera + IMU
-- Clip-on form factor
+#### Hardware Variants
 
-**Variant B — Event + Camera**
-- Event camera + conventional camera + IMU
-- Better for SLAM integration (provides forward visual odometry)
+**Clip-On Design (Variants A, B):**
+- Single PCB, clips to existing glasses
+- 30 mm × 20 mm × 8 mm
+- < 8 g total
+- 50-80 mAh battery
+- Suitable for: research, intermittent use
 
-**Variant C — Full Array**
-- Front event camera + front conventional camera + side cameras
-- Head-mounted 180°+ coverage
-- Suitable for full SLAM integration as visual odometry anchor
+**Frame-Integrated Design (Variant C):**
+- PCB segments embedded in temple arms
+- 60 mm × 4 mm × 3 mm per arm
+- Requires custom or semi-custom frames
+- 80-150 mAh battery (in temples or separate module)
+- Suitable for: permanent deployment
+
+**Headband Design (Alternative to Frame-Integrated):**
+- Central PCB at forehead
+- Camera modules on flex extensions at temporal positions
+- Easier to prototype than frame-integrated
+- Same capability as frame-integrated
+
+#### Configuration Options
+
+| Option | Values | Notes |
+|--------|--------|-------|
+| Sensor type | Event-only / Event + Camera | Event-only for fast transient detection |
+| Camera count | 1 / 2 / 3 | Forward + side cameras |
+| UWB | Disabled / Enabled | For precision head-torso sync |
+| Power source | Battery / Belt cable (Variant C) | Cable for extended runtime |
 
 ---
 
@@ -249,7 +553,7 @@ TrackedEntity {
 
 **Use cases:** All alert generation, gait analysis, directional haptic routing, low-latency real-time awareness.
 
-**Power:** Runs on all hardware configurations. Always active.
+**Power:** Runs on all hardware configurations. Always active. ~100-300 mW.
 
 ### Mode B — Dense SLAM World Map
 
@@ -270,7 +574,7 @@ WorldMap {
 
 **Use cases:** Full environment review, legal evidence, SLAM-based odometry for body-frame enhancement, 360° panoramic recording.
 
-**Power:** Requires belt node Linux SoM variant or companion app compute offload.
+**Power:** Requires belt node Linux SoM variant or companion app compute offload. ~1-3 W.
 
 ### Dual Mode Simultaneous Operation
 
@@ -280,67 +584,183 @@ When belt node is Linux SoM class, both modes run simultaneously:
 - Mode A benefits from Mode B: object classifications from SLAM improve PentaTrack drift profiles
 - Mode B benefits from Mode A: PentaTrack predictions annotate the dense map with motion intent
 
+### Mobile SLAM Characteristics
+
+Unlike room-mounted SLAM (stationary sensors), SENTINEL-WEAR SLAM is **mobile** — sensors move with the wearer:
+
+**Challenges:**
+- Motion blur during walking (pendant sway)
+- Revisitation detection (how to recognize "same kitchen")
+- Map segmentation (home vs office vs transit)
+- Memory constraints for persistent maps
+
+**Solutions:**
+- IMU-based image stabilization (software compensation)
+- Visual loop closure when revisiting locations
+- User-controlled map segments (can delete specific locations)
+- Background optimization for large maps
+
 ---
 
 ## 360° Curved Pendant — Technical Architecture
 
-The 360° curved pendant is a signature variant of SENTINEL-WEAR. It transforms the pendant node from a directional sensor to a continuous 360° capture platform.
+The 360° curved pendant is a signature node type of SENTINEL-WEAR. It transforms the pendant from a directional sensor to a continuous 360° capture platform.
 
-### Flexible PCB Architecture
+### Wired Internal Camera Bus Architecture
 
-The pendant hangs from a necklace chain. A curved flexible PCB (or rigid-flex hybrid) follows the arc of the pendant face. Camera modules are placed at regular angular intervals around the circumference.
+**Recommended approach:** All cameras connect via internal MIPI CSI-2 or parallel bus to a central vision processor on the pendant. This provides:
+- Maximum internal bandwidth (no wireless constraint within pendant)
+- Hardware-synchronized capture (FSYNC)
+- Single encoded stream to belt node
 
-**Physical layout (example — 8-camera variant):**
 ```
-         Top of pendant (worn at chest)
-    ┌────────────────────────────────┐
-    │ 315°  0°  45°                  │  ← Front face cameras (3 cameras)
-    │                                │
-    │ 270°        90°                │  ← Side cameras (2 cameras)
-    │                                │
-    │ 225°  180°  135°               │  ← Rear / back cameras (3 cameras)
-    └────────────────────────────────┘
-         Bottom of pendant
+8 Cameras → MIPI CSI-2 (internal) → Vision Processor on Pendant
+                                           │
+                                           ├── Stitch on-pendant → Single 360° stream
+                                           └── Encode (H.264/H.265)
+                                                   │
+                                                   ▼
+                                              UWB or WiFi* to Belt
+                                                   │
+                                                   ▼
+                                           Belt → WiFi → Companion App
+
+*WiFi only if pendant has WiFi module (optional, not recommended for jewelry form factor)
 ```
 
-**Camera spacing and overlap:**
-- 8 cameras at 45° intervals: each camera needs ~60° FoV for full overlap
-- 6 cameras at 60° intervals: each camera needs ~80° FoV for full overlap
-- 4 cameras at 90° intervals: each camera needs ~100° FoV (wide-angle required)
+### Camera Coverage Configurations
 
-**PCB construction options:**
-- **Rigid-flex:** Rigid PCB segments joined by flexible bridges. Best for component density and reliability.
-- **Fully flexible:** Single-layer or multi-layer flexible PCB. Better conformability. More fragile.
-- **Modular array:** Individual camera modules connected by a flexible ribbon cable. Allows independent replacement.
+| Config | Cameras | Angular Spacing | FoV Needed | Bandwidth (VGA H.264) |
+|--------|---------|-----------------|------------|----------------------|
+| Minimal | 4 | 90° | ≥ 100° | ~1-2 Mbps |
+| Standard | 6 | 60° | ≥ 70° | ~1.5-3 Mbps |
+| Dense | 8 | 45° | ≥ 55° | ~2-4 Mbps |
+| Ultra | 12 | 30° | ≥ 40° | ~3-6 Mbps |
 
-### Image Processing Pipeline
+### Bandwidth Capabilities Over UWB
 
-**On-pendant ISP (if compute allows):**
-- Each camera produces a raw frame
-- On-pendant ISP chip stitches to equirectangular 360° frame
-- Compressed stream transmitted to belt node over high-bandwidth link (USB 3.x or custom RF)
+UWB supports continuous streaming at appropriate resolutions:
 
-**Belt-node processing:**
-- Raw camera streams from all cameras transmitted individually
-- Belt node Linux SoM handles stitching (GPU-accelerated if available)
-- Real-time 360° video recording to SD card
-- Companion app receives stitched stream for live 360° viewing
+| Stream Type | Bandwidth | UWB Capability | Notes |
+|-------------|-----------|----------------|-------|
+| 8 cameras × QVGA MJPEG | ~0.5-1 Mbps | ✅ Easily handled | Instant baseline |
+| 8 cameras × VGA H.264 | ~2-4 Mbps | ✅ Handled | Standard quality |
+| Stitched 360° at 2K H.264 | ~3-4 Mbps | ✅ Handled | Good quality |
+| Stitched 360° at 2.5K H.264 | ~5-6 Mbps | ⚠️ At max | High quality |
+| Stitched 360° at 4K H.264 | ~8-15 Mbps | ❌ Exceeds | Requires WiFi |
 
-**Companion app processing:**
-- For lowest pendant complexity: raw frames from all cameras transmitted to app
-- App handles stitching in software
-- Enables highest-quality output at the cost of bandwidth
+### Tiered Progressive Quality Strategy
 
-### SLAM Integration
+**Start functional, improve over time. Never blocked waiting for "perfect" data.**
 
-The 360° pendant with SLAM is extremely powerful:
-- 360° visual input at chest level
-- Combined with anklet ToF, LiDAR node data, and belt IMU
-- Produces a continuously-updated 3D map anchored to the body
-- As the wearer moves, new areas of the environment are mapped
-- The SLAM map becomes a persistent 3D record of everywhere the wearer has been
+```
+Phase 1 (Instant — within 1 second):
+    Send all 8 cameras at 320×240 (QVGA) MJPEG
+    Total: ~500 Kbps
+    Belt stitches rough 360° panorama immediately
+    User sees: Low-res but complete 360° view
 
-This is equivalent capability to a stationary 360° security camera array — but mobile, wearable, and body-anchored.
+Phase 2 (Progressive — over 5-10 seconds):
+    Send higher-res keyframes sequentially:
+    Camera 0: 720p keyframe → belt updates stitching
+    Camera 1: 720p keyframe → belt updates stitching
+    ...
+    Camera 7: 720p keyframe → belt updates stitching
+    Each keyframe: ~100-200 KB, sent over seconds
+    Combined with baseline: ~2-4 Mbps total
+
+Phase 3 (Continuous):
+    Maintain QVGA baseline continuously
+    Periodically send higher-res keyframes
+    Final panorama quality approaches what 720p would produce
+```
+
+### Hardware Synchronization (FSYNC)
+
+All cameras must capture simultaneously for clean stitching:
+- Single FSYNC GPIO line from vision processor to all camera FSYNC pins
+- All cameras trigger on same FSYNC rising edge
+- PCB trace length matching: target < 10 ns skew between any two cameras
+- Without FSYNC: cameras drift at frame rate, causing visible stitching artifacts
+
+### Power Architecture
+
+| Component | Power Draw | Notes |
+|-----------|------------|-------|
+| 8 × cameras active | 1-2 W | Depends on sensor model |
+| Vision processor (stitching) | 1-2 W | ARM-based ISP or dedicated chip |
+| Radar + IMU + acoustic | 0.5 W | Continuous sensing |
+| BLE/UWB radio | 0.1-0.2 W | Transmission to belt |
+| **Total active** | **2.5-4.5 W** | Full 360° streaming |
+| **Total (reduced duty)** | **1-2 W** | Standard quality with duty cycling |
+
+**Battery implications:**
+- 800 mAh at 3.7V = ~3 Wh
+- At 3W draw: ~1 hour runtime
+- At 1.5W draw (duty-cycled): ~2 hours runtime
+- Recommendation: Use belt power input for extended operation
+
+### Thermal Management
+
+4W in a 50×50×15mm pendant will exceed comfortable temperature:
+- Thermal vias to spread heat away from vision processor
+- Air gap between PCB and enclosure for dissipation
+- Maximum skin-contact temperature: 40-42°C
+- Duty cycling to reduce sustained thermal load
+
+---
+
+## Extreme Velocity Sensing — Production and Research
+
+### Production Capability
+
+The extreme velocity sensing architecture (Doppler radar + event camera fusion) is designed for **production use**, not just research. This enables detection of fast-moving objects (bullets, debris, fragments) within the body-frame awareness field.
+
+### Sensor Requirements
+
+**Doppler Radar (mmWave):**
+- Standard automotive profiles assume human-scale velocities (±18 m/s)
+- Extended configuration required for projectile detection (±300+ m/s)
+- TI IWR6843 can be configured for extended Doppler range with reduced range resolution
+- CW (Continuous Wave) mode preferred for zero scanning latency
+
+**Event Camera:**
+- Microsecond-latency motion detection
+- Triggers on rapid angular motion across pixel array
+- Provides trajectory vector for approaching object
+
+### Reaction Time Budget
+
+At 3-meter engagement distance:
+- Rifle velocity (850 m/s): **3.5 ms** from entry to impact
+- Handgun velocity (350 m/s): **8.5 ms** from entry to impact
+
+**Detection budget:**
+- Doppler detection: 10-100 microseconds
+- Event camera trigger: < 1 ms
+- Processing and alert decision: 100-500 microseconds
+- **Total detection:** < 1 ms
+- **Remaining budget:** 2.5-7.5 ms (for user response or out-of-scope countermeasures)
+
+### Hardware Configuration
+
+```toml
+[extreme_velocity]
+enabled = false                 # Opt-in feature
+mode = "production"             # "disabled" | "research" | "production"
+doppler_update_rate_hz = 10000  # High update rate for fast transients
+event_camera_always_on = true
+min_velocity_ms = 50            # Ignore objects below this velocity
+max_detection_distance_m = 10
+alert_on_detection = true
+```
+
+### Integration with 360° Pendant
+
+The 360° pendant can integrate event cameras:
+- **Variant E — Event-Enhanced:** 6 conventional + 2 event cameras
+- Event cameras positioned at key angles (e.g., forward ± 30°)
+- Conventional cameras provide color/detail; event cameras provide velocity detection
 
 ---
 
@@ -351,22 +771,27 @@ This is equivalent capability to a stationary 360° security camera array — bu
 │                        SENTINEL-WEAR Sensing Stack                           │
 ├──────────────────────────────────────────────────────────────────────────────┤
 │  Always-On Layer (Low Power — All Nodes)                                     │
-│  mmWave radar (presence, motion, micro-Doppler activity signatures)           │
-│  IMU (body-frame orientation, gait, gesture)                                  │
+│  mmWave radar (presence, motion, micro-Doppler activity signatures)          │
+│  IMU (body-frame orientation, gait, gesture)                                 │
 │  PIR (optional — binary presence at specific nodes)                          │
 ├──────────────────────────────────────────────────────────────────────────────┤
-│  High-Fidelity Layer (Event-Triggered or Continuous)                          │
-│  Solid-state LiDAR / ToF (geometry, ground clearance, obstacle detection)     │
-│  Event-based camera (microsecond-latency fast object detection)               │
-│  Microphone array (acoustic DOA, material classification, event detection)    │
-│  Environmental sensors (temperature, humidity, VOC, air quality)              │
+│  High-Fidelity Layer (Event-Triggered or Continuous)                         │
+│  Solid-state LiDAR / ToF (geometry, ground clearance, obstacle detection)    │
+│  Event-based camera (microsecond-latency fast object detection)              │
+│  Microphone array (acoustic DOA, material classification, event detection)   │
+│  Environmental sensors (temperature, humidity, VOC, air quality)             │
 ├──────────────────────────────────────────────────────────────────────────────┤
-│  Visual Capture Layer (User-Configured — Any Node)                            │
-│  Conventional cameras at any angular position on any node                     │
-│  360° curved pendant multi-camera array (signature variant)                   │
-│  Full video recording (raw, compressed, continuous, or on-trigger)            │
-│  Live streaming to companion app                                               │
-│  SLAM-ready visual odometry output                                             │
+│  Visual Capture Layer (User-Configured — Any Node)                           │
+│  Conventional cameras at any angular position on any node                    │
+│  360° curved pendant multi-camera array (signature variant)                  │
+│  Full video recording (raw, compressed, continuous, or on-trigger)           │
+│  Live streaming to companion app                                              │
+│  SLAM-ready visual odometry output                                            │
+├──────────────────────────────────────────────────────────────────────────────┤
+│  Extreme Velocity Layer (Production-Capable)                                 │
+│  Doppler radar (CW mode, extended velocity range)                            │
+│  Event camera (microsecond detection)                                        │
+│  Fusion for projectile detection within 3.5-8.5 ms window                     │
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -394,7 +819,8 @@ sentinel-wear/
 ├── firmware/                       # no_std embedded firmware per node type
 ├── hardware/                       # PCB schematics, BOMs, test jig
 │   ├── schematic/
-│   │   ├── pendant_node/           # All pendant variants including 360°
+│   │   ├── pendant_node/           # Standard and medallion variants
+│   │   ├── 360_pendant_node/       # 360° curved pendant (separate node type)
 │   │   ├── bracelet_node/
 │   │   ├── belt_node/
 │   │   ├── anklet_node/
@@ -407,13 +833,23 @@ sentinel-wear/
 │   ├── guides/
 │   │   ├── getting_started.md
 │   │   ├── body_frame_calibration.md
-│   │   └── alert_modalities.md
+│   │   ├── alert_modalities.md
+│   │   ├── calibration_360_pendant.md
+│   │   ├── power_profiles.md
+│   │   └── connectivity_configuration.md
 │   ├── theory/
 │   │   ├── future_research.md
 │   │   ├── body_coordinate_fusion.md
 │   │   ├── drift_profiles_at_body_scale.md
 │   │   ├── form_factor_human_factors.md
 │   │   ├── extreme_velocity_sensing.md
+│   │   ├── doppler_radar_config.md
+│   │   ├── slam_world_model.md
+│   │   ├── 360_pendant_architecture.md
+│   │   ├── ban_bandwidth_budget.md
+│   │   ├── power_management.md
+│   │   ├── thermal_management.md
+│   │   ├── rf_coexistence.md
 │   │   ├── passive_materials_research.md
 │   │   └── why_no_actuation.md
 │   ├── api/
@@ -424,34 +860,32 @@ sentinel-wear/
 ├── mechanical/                     # CAD, STL, enclosure designs
 ├── production/                     # Manufacturing SOPs, QC
 ├── legal/                          # Compliance, ethics, export control
+├── config/                         # Configuration file templates
+│   └── sentinel-wear-full.toml
 ├── media/
 ├── README.md
 ├── LICENSE
 └── CHANGELOG.md
 ```
 
-### Dependency Chain
+### Crate vs Firmware Relationship
 
-```
-OMNI-SENSE (sensor abstraction, physics, fusion)
-      ↓
-sentinel-core (shared types, events, config)
-      ↓
-sentinel-perception (node sensor pipelines)
-sentinel-body-frame (IMU fusion, coordinate transforms, calibration)
-      ↓
-sentinel-fusion (multi-node CI + JPDA)
-sentinel-slam (360° stitching, SLAM, dense world model)
-      ↓
-sentinel-tracking (PentaTrack bridge, world model integration)
-sentinel-extreme-velocity (high-speed prediction)
-sentinel-storage (recording management)
-      ↓
-sentinel-alerts (haptic routing, notification)
-sentinel-api (companion app server)
-      ↓
-sentinel-belt-controller (main binary)
-```
+**Crates** run on the belt node (compute hub):
+- Fusion algorithms (multi-node data combining)
+- PentaTrack (predictive tracking)
+- SLAM (dense world model)
+- API server (companion app interface)
+- Recording management
+- Alert routing
+
+**Firmware** runs on each node's MCU:
+- Sensor drivers (OMNI-SENSE)
+- On-node processing (compression, event detection)
+- BAN protocol (BLE/UWB communication)
+- Power management
+- Local storage (if configured)
+
+**Data flow:** Sensors → Firmware (node MCU) → BAN → Crate (belt node) → WiFi/Cellular → Companion App
 
 ---
 
@@ -463,9 +897,12 @@ Distributed wearable sensing requires precise clock alignment across all body no
 
 **Per-node offset estimation:** Each node runs `omni-sense-time::ClockOffsetEstimator` (PTP-style four-timestamp exchange) tracking local clock drift with continuous correction.
 
-**UWB upgrade path:** Qorvo DW3000-class UWB available on all nodes for sub-nanosecond ranging and time alignment when required for SLAM accuracy.
+**UWB upgrade path:** Qorvo DW3000-class UWB available on all nodes for sub-nanosecond ranging and time alignment when required for SLAM accuracy or extreme velocity detection.
 
-**360° pendant sync:** The 360° curved pendant requires tight synchronization across all camera modules for clean stitching. Camera sync lines within the pendant PCB provide hardware-level sync; the belt node time master provides cross-pendant timing reference.
+**360° pendant sync:** The 360° curved pendant requires tight synchronization across all camera modules for clean stitching:
+- Camera sync lines within the pendant PCB provide hardware-level sync
+- The belt node time master provides cross-pendant timing reference
+- Target: < 10 ns skew between any two cameras
 
 ---
 
@@ -478,7 +915,11 @@ The belt node's IMU defines the body-frame origin:
 
 All node detections are expressed in this stabilized frame via `omni-sense-frames::BodyFrameStabilizer`. Stabilization mode (World, Translational, None) configurable per application.
 
+**Translational stabilization (default):** Body frame co-translates with wearer but does not co-rotate. "Approach from right rear" means actual approach from that direction, regardless of which way the wearer is facing.
+
 Walk-through calibration (`sentinel-body-frame::WalkThroughCalibrator`) establishes geometric offsets of each node relative to the torso origin. The 360° pendant calibration includes angular offset of each camera module relative to the pendant center.
+
+**Head-torso separation:** When eyewear node is present, head orientation is computed separately from torso orientation, enabling correct attribution of forward-facing detections regardless of head position.
 
 ---
 
@@ -503,6 +944,19 @@ SENTINEL-WEAR has no system-imposed data restrictions. All data handling is user
 - Tiered: metadata by default, raw on alert
 - Any combination of the above
 
+```toml
+[data]
+store_raw_video = true
+store_raw_audio = false
+store_raw_sensor_data = false
+storage_target = "sd_card"       # "sd_card" | "internal_flash" | "network_path"
+retention_days = 30              # 0 = keep forever
+continuous_recording = false
+recording_trigger = "on_detection"  # "always" | "on_detection" | "on_alert" | "manual"
+max_storage_mb = 0               # 0 = unlimited
+include_integrity_chain = true
+```
+
 ---
 
 ## Data Storage and Companion App
@@ -518,6 +972,11 @@ All node classes support local storage:
 
 Mobile (iOS/Android) and desktop (Windows/macOS/Linux) apps connect to the belt node's embedded server.
 
+**Connection modes:**
+- **Primary:** Wi-Fi (same network as belt node)
+- **Remote:** Cellular (when away from home network)
+- **Fallback:** BLE direct (limited to metadata and alerts)
+
 **Core features:**
 - Live sensor display (both sparse world model and dense SLAM view)
 - 360° panoramic live view from curved pendant cameras
@@ -526,6 +985,8 @@ Mobile (iOS/Android) and desktop (Windows/macOS/Linux) apps connect to the belt 
 - Gait analytics, event history, anomaly logs
 - System configuration
 - Legal export with cryptographic integrity chain
+
+**Remote access:** When enabled, companion app connects via belt node's cellular or remote WiFi endpoint. Requires user-set bearer token. All communication encrypted.
 
 See `apps/README.md` for full API and architecture specification.
 
@@ -575,6 +1036,17 @@ What SENTINEL-WEAR does with what it perceives:
 - **Legal evidence export:** Cryptographic hash chain, timestamp, device ID embedded in exported files.
 - **Emergency contact:** Manually triggered (never automatic) location + clip share to designated contact.
 
+### Alert Routing
+
+| Alert Class | Haptic Pattern | Priority | Nodes Involved |
+|-------------|---------------|----------|----------------|
+| HumanApproaching slow | Single pulse, 300ms | Info | Nearest to approach direction |
+| HumanApproaching fast | Double pulse, 100ms each | Warning | Nearest to approach direction |
+| VehicleNear | Triple pulse with pause | Warning | Pendant + nearest bracelet |
+| GaitAnomaly | Sustained buzz 500ms | Warning | Anklets |
+| FallDetected | Extended buzz 1000ms | Critical | All nodes |
+| FastObjectDetected | Rapid pulses (50ms × 5) | Critical | Pendant, eyewear |
+
 ---
 
 ## Gait Analysis
@@ -588,25 +1060,7 @@ The anklet IMUs are the primary input for gait analysis:
 
 These feed PentaTrack's `WearerSelfMotion` anomaly detection and generate predictive stumble alerts before falls occur.
 
----
-
-## Extreme Velocity Sensing Research Track
-
-A research track studies the physics of detecting fast-moving objects at body-frame engagement distances.
-
-**The Physics Problem:**
-- Standard LiDAR: scanning latency creates blind spots. Fast-moving objects traverse meters between scans.
-- Acoustic: sound travels 343 m/s. Supersonic objects arrive before sound.
-
-**The Viable Sensor Stack:**
-- Doppler radar (CW): zero scanning latency, instantaneous velocity shift detection.
-- Event-based vision: microsecond reaction time.
-
-**Reaction Time Budget:** At 3-meter engagement distance, 2.5 ms (rifle-velocity) to 8.5 ms (handgun-velocity) from object entry to detection and alert processing.
-
-This research documents detection capabilities. It does not address physical interception — that is explicitly out of scope.
-
-See `docs/theory/extreme_velocity_sensing.md` for the full document.
+**Gait event transmission:** Anklets perform on-node gait event detection, transmitting events (not raw IMU data) to belt node. Raw IMU bursts sent only on anomaly detection for detailed analysis.
 
 ---
 
@@ -617,6 +1071,7 @@ See `docs/theory/extreme_velocity_sensing.md` for the full document.
 - Physical therapy monitoring and progress tracking
 - Industrial worker safety (proximity alerts in factories and construction)
 - Personal security for vulnerable populations (journalists, aid workers)
+- Accessibility: haptic spatial awareness for visually impaired users
 - Research platform for distributed wearable sensing architecture
 
 ---
@@ -625,6 +1080,14 @@ See `docs/theory/extreme_velocity_sensing.md` for the full document.
 
 Embedded firmware (`firmware/`) runs on `no_std` Rust targeting ARM Cortex-M (STM32, nRF5340, i.MX RT). Each node type has a dedicated binary. Shared logic (drivers, BAN protocol) in `firmware/src/lib.rs`.
 
+**Key firmware responsibilities:**
+- Sensor drivers (OMNI-SENSE abstraction)
+- On-node processing (event detection, compression)
+- BAN protocol (BLE/UWB communication to belt node)
+- Power management
+- Local storage (SD card if configured)
+- **NO external network connectivity** (firmware for non-belt nodes has no WiFi/cellular drivers)
+
 See `firmware/firmware.md` for the full firmware architecture specification.
 
 ---
@@ -632,13 +1095,29 @@ See `firmware/firmware.md` for the full firmware architecture specification.
 ## Hardware
 
 Reference PCB designs for all node variants:
-- `hardware/schematic/pendant_node/` — Standard flat, 360° curved, medallion variants
-- `hardware/schematic/bracelet_node/` — Minimal, standard, extended variants
+- `hardware/schematic/pendant_node/` — Standard and medallion variants
+- `hardware/schematic/360_pendant_node/` — 360° curved pendant (separate node type)
+- `hardware/schematic/bracelet_node/` — Single design, multiple configurations
 - `hardware/schematic/belt_node/` — MCU, Linux SoM, high-performance variants
-- `hardware/schematic/anklet_node/` — Minimal and extended variants
-- `hardware/schematic/eyewear_node/` — Event-only, event+camera, full-array variants
+- `hardware/schematic/anklet_node/` — Single design, multiple configurations
+- `hardware/schematic/eyewear_node/` — Clip-on and frame-integrated variants
 - `hardware/testing/test_jig_pcb/` — Production test jig
 - `hardware/hardware_config.md` — Interface standards, pin maps, power architecture
+
+---
+
+## Mechanical
+
+Enclosure designs for all node types:
+- `mechanical/cad/` — STEP files for all enclosures
+- `mechanical/stl/` — STL files for 3D printing
+- `mechanical/mechanical_spec.md` — Enclosure specifications
+
+**Materials requirements:**
+- Skin-contact surfaces: Grade 5 titanium, 316L surgical steel, or medical-grade silicone
+- IP rating: IP67 for bracelets, anklets, pendant (water exposure)
+- IP54 for belt node (splashes, not submersion)
+- EN 1811:2011 nickel release compliance
 
 ---
 
@@ -647,11 +1126,11 @@ Reference PCB designs for all node variants:
 - **Phase 1.** Belt-node-only bench prototype — full sensor stack, body-frame fusion of one node, IMU-driven drift correction.
 - **Phase 2.** Add bracelet + pendant — demonstrate multi-node body-frame fusion and cross-node drift correction.
 - **Phase 3.** Full mesh of all six nodes with BAN protocol. Walk-through calibration. Sparse world model complete.
-- **Phase 4.** 360° curved pendant prototype. Camera array stitching. Dense SLAM integration.
-- **Phase 5.** Comfort, durability, weight, water resistance, hypoallergenic-material, and human-factors study.
-- **Phase 6.** Companion app — both world model views operational. Full recording and legal export.
+- **Phase 4.** 360° curved pendant prototype. Camera array stitching. Dense SLAM integration. Extreme velocity detection integration.
+- **Phase 5.** Comfort, durability, weight, water resistance, hypoallergenic-material, and human-factors study. Thermal management validation.
+- **Phase 6.** Companion app — both world model views operational. Full recording and legal export. Remote access via cellular.
 - **Phase 7.** Public open-data release of body-frame trajectory dataset for the research community.
-- **Parallel Track.** Extreme-velocity sensing physics characterization.
+- **Parallel Track.** Extreme-velocity sensing physics characterization and production hardening.
 
 ---
 
@@ -662,9 +1141,19 @@ git clone https://github.com/ungatedminds/sentinel-wear
 cd sentinel-wear
 cargo build --workspace
 cargo test --workspace
+
+# Run belt controller in simulation mode
 cargo run -p sentinel-belt-controller -- --simulated --config scenarios/sim_basic.toml
+
+# Build firmware for pendant node
 cd firmware
 cargo build --target thumbv7em-none-eabihf --bin pendant_node --release
+
+# Build firmware for 360° pendant
+cargo build --target thumbv7em-none-eabihf --bin pendant_360 --release
+
+# Build firmware for belt node (Linux SoM variant)
+cargo build --target aarch64-unknown-linux-gnu --bin belt_node --release
 ```
 
 ---
@@ -672,6 +1161,8 @@ cargo build --target thumbv7em-none-eabihf --bin pendant_node --release
 ## Disclaimer
 
 SENTINEL-WEAR is a research and education project. It is not a medical device, not certified personal protective equipment, not a self-defense product, and not a substitute for any law-enforcement, medical, or emergency service. The maintainers make no warranty of fitness for any safety-critical use. Use at your own risk for educational purposes only.
+
+**Extreme velocity detection:** The system can detect fast-moving objects within millisecond timeframes. This detection capability does not imply any ability to prevent impact from such objects. Physical interception of projectiles is explicitly out of scope.
 
 ---
 
