@@ -1,6 +1,6 @@
 # Firmware Architecture — SENTINEL-WEAR
 
-**Version:** 0.1 | **Status:** Research | **Target:** `no_std` (ARM Cortex-M / RISC-V), Linux (Belt Node SoM)
+**Version:** 0.2 | **Status:** Research | **Target:** `no_std` (ARM Cortex-M / RISC-V), Linux (Belt Node SoM)
 
 ---
 
@@ -12,6 +12,7 @@ The firmware is implemented in Rust using the `no_std` ecosystem for MCUs and st
 - Driving sensors (mmWave radar, IMU, LiDAR/ToF, acoustic, environmental, event, cameras).
 - Performing node-local processing to reduce BAN bandwidth.
 - Power management (critical for 24–72 hour battery life).
+- Thermal management (critical for wearables with continuous operation).
 - **For all non-belt nodes:** communicating with the belt controller over BAN (BLE 5.x or UWB) only. No WiFi, no cellular.
 - **For the belt node:** managing BAN hub, WiFi connectivity, optional cellular SIM, companion app API server, SLAM processing, and recording lifecycle.
 
@@ -56,12 +57,11 @@ The firmware is implemented in Rust using the `no_std` ecosystem for MCUs and st
 ```rust
 // This is structurally enforced in the build system
 // Non-belt binaries CANNOT depend on wifi or cellular features
-#[cfg(not(feature = "belt_node"))]
-compile_error!("WiFi and cellular features are belt-node-only");
-
-// Pendant node binary
 #[cfg(all(feature = "wifi", not(feature = "belt_node")))]
-compile_error!("WiFi is not available on non-belt nodes");
+compile_error!("WiFi is belt-node-only and cannot be used on other nodes");
+
+#[cfg(all(feature = "cellular", not(feature = "belt_node")))]
+compile_error!("Cellular is belt-node-only and cannot be used on other nodes");
 ```
 
 ### Belt Node Firmware Capabilities
@@ -73,6 +73,7 @@ The belt node firmware is the only firmware variant that links against:
 | `wifi.rs` | ✅ Yes | Connect to home network, serve companion app API |
 | `cellular.rs` | ✅ Yes | LTE/5G connectivity for remote access |
 | `ban_hub.rs` | ✅ Yes (as master) | Coordinate all BAN communication |
+| `antenna_diversity.rs` | ✅ Yes (recommended) | Dual antenna switching for reliability |
 | `slam.rs` | ✅ Yes (Linux SoM) | Dense world model construction |
 | `api_server.rs` | ✅ Yes (Linux SoM) | HTTP/WebSocket/RTSP server |
 
@@ -101,6 +102,7 @@ The firmware implements intelligent transport selection based on data requiremen
 │  → Moderate-bandwidth continuous (single camera at 720p-1080p)               │
 │  → 360° at 2K-2.5K resolution (stitched)                                     │
 │  → High-bandwidth BURSTS (compressed clips, progressive keyframes)           │
+│  → All 8 cameras at QVGA-VGA simultaneously                                  │
 │  → Optional on nodes, enabled per configuration                              │
 │  → Power: 50-150 mW when active                                              │
 ├─────────────────────────────────────────────────────────────────────────────┤
@@ -134,6 +136,33 @@ The firmware implements intelligent transport selection based on data requiremen
 | Stitched 360° at 4K H.264 | ~8-15 Mbps | ❌ **Exceeds** | Requires WiFi |
 | 8 cameras × 720p raw | ~50+ Mbps | ❌ **Exceeds** | Not feasible |
 
+**Key insight:** UWB is NOT a limitation — it is a capability that supports most use cases at appropriate quality levels. Higher resolutions require WiFi, which is available at the belt node.
+
+### Tiered Progressive Quality Strategy
+
+When bandwidth is constrained (UWB or poor WiFi), the firmware implements progressive quality:
+
+```
+Phase 1 (Instant — within 1 second):
+    • Transmit all 8 cameras at QVGA (~500 Kbps total)
+    • Belt receives and stitches complete but low-res 360° panorama
+    • User sees functional view immediately
+
+Phase 2 (Progressive — over 5-10 seconds):
+    • Sequentially transmit higher-resolution keyframes
+    • Camera 0: 720p keyframe → belt updates stitching
+    • Camera 1: 720p keyframe → belt updates stitching
+    • ... (all 8 cameras)
+    • Combined bandwidth: ~2-4 Mbps (within UWB capability)
+
+Phase 3 (Continuous refinement):
+    • Maintain QVGA baseline continuously
+    • Periodically send high-res keyframes
+    • Quality improves progressively over time
+
+Result: Immediate functionality, progressive improvement
+```
+
 **Firmware implication:** The belt node firmware must handle multiple quality tiers and adapt based on available bandwidth.
 
 ---
@@ -158,8 +187,13 @@ BLE Connection Event (30 ms interval)
 ├── Slot 17-20 ms: Bracelet L → Belt (detection)
 ├── Slot 20-22 ms: Belt → Bracelet R (sync)
 ├── Slot 22-25 ms: Bracelet R → Belt (detection)
-├── Slot 25-30 ms: Reserved (alerts, retransmits, eyewear)
+├── Slot 25-28 ms: RESERVED (critical alerts, extreme velocity)
+└── Slot 28-30 ms: Reserved (retransmits, eyewear)
 ```
+
+### Reserved Slot for Critical Alerts
+
+**Slot 25-28 ms is reserved for critical alerts including extreme velocity detection.** This guarantees that critical messages can be transmitted within one connection interval regardless of other traffic.
 
 ### Priority-Based Bandwidth Allocation
 
@@ -181,11 +215,51 @@ BLE Connection Event (30 ms interval)
 | 100 ms | ~60 ms | 2-5 mW | Power saving |
 | 1000 ms | ~600 ms | <1 mW | Sleep mode |
 
+### Dynamic Scheduling
+
+The firmware implements context-aware dynamic scheduling that adjusts priorities based on current activity:
+
+| Context | Schedule Adjustment |
+|---------|---------------------|
+| Walking detected | Prioritize anklets (gait timing critical) |
+| Threat detected | Prioritize pendant (sensing critical) |
+| Idle state | Extend intervals (power saving) |
+| Streaming active | Shift heavy traffic to UWB |
+| Extreme velocity alert | Preempt all other traffic; use reserved slot |
+
+```rust
+/// Dynamic scheduling configuration
+#[derive(Clone, Debug)]
+pub struct DynamicScheduleConfig {
+    /// Base connection interval
+    pub base_interval_ms: u16,
+    /// Context-based priority boosts
+    pub walking_anklet_boost: f32,
+    pub threat_pendant_boost: f32,
+    /// Idle mode multiplier
+    pub idle_interval_multiplier: f32,
+    /// Enable critical alert preemption
+    pub critical_preemption: bool,
+}
+
+impl Default for DynamicScheduleConfig {
+    fn default() -> Self {
+        Self {
+            base_interval_ms: 30,
+            walking_anklet_boost: 1.5,
+            threat_pendant_boost: 2.0,
+            idle_interval_multiplier: 2.0,
+            critical_preemption: true,
+        }
+    }
+}
+```
+
 ### Firmware Configuration
 
 ```rust
 /// BLE scheduling configuration
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct BleScheduleConfig {
     /// Connection interval in milliseconds
     pub connection_interval_ms: u16,
@@ -193,8 +267,11 @@ pub struct BleScheduleConfig {
     pub node_priority: [NodeId; 6],
     /// Slot allocation per node in microseconds
     pub slot_allocation_us: [(NodeId, u16); 6],
-    /// Reserved slot for alerts (microseconds)
-    pub alert_slot_us: u16,
+    /// Reserved slot for critical alerts (microseconds)
+    pub critical_slot_start_us: u16,
+    pub critical_slot_end_us: u16,
+    /// Dynamic scheduling configuration
+    pub dynamic: DynamicScheduleConfig,
 }
 
 impl Default for BleScheduleConfig {
@@ -202,12 +279,12 @@ impl Default for BleScheduleConfig {
         Self {
             connection_interval_ms: 30,
             node_priority: [
-                NodeId::Belt,      // Priority 1
-                NodeId::AnkletL,   // Priority 2
-                NodeId::AnkletR,   // Priority 2
-                NodeId::Pendant,   // Priority 3
-                NodeId::BraceletL, // Priority 4
-                NodeId::BraceletR, // Priority 4
+                NodeId::Belt,
+                NodeId::AnkletL,
+                NodeId::AnkletR,
+                NodeId::Pendant,
+                NodeId::BraceletL,
+                NodeId::BraceletR,
             ],
             slot_allocation_us: [
                 (NodeId::Pendant, 3000),
@@ -217,7 +294,9 @@ impl Default for BleScheduleConfig {
                 (NodeId::BraceletR, 3000),
                 (NodeId::Eyewear, 2000),
             ],
-            alert_slot_us: 5000,
+            critical_slot_start_us: 25000,
+            critical_slot_end_us: 28000,
+            dynamic: DynamicScheduleConfig::default(),
         }
     }
 }
@@ -225,7 +304,498 @@ impl Default for BleScheduleConfig {
 
 ---
 
-## 5. Target Platforms
+## 5. QoS Classes — Traffic Prioritization
+
+### 5.1 QoS Class Definitions
+
+The firmware implements a four-tier QoS system for BAN traffic:
+
+```rust
+/// Quality of Service classes for BAN traffic
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum QoSClass {
+    /// Lowest priority - background telemetry
+    Low,
+    /// Normal priority - standard detections
+    Medium,
+    /// High priority - time-sensitive detections
+    High,
+    /// Critical priority - preempts other traffic
+    Critical,
+}
+
+/// Traffic type to QoS mapping
+impl From<&TrafficType> for QoSClass {
+    fn from(traffic_type: &TrafficType) -> Self {
+        match traffic_type {
+            // Critical - immediate transmission, preempt other traffic
+            TrafficType::ExtremeVelocityDetection => QoSClass::Critical,
+            TrafficType::FallDetection => QoSClass::Critical,
+            TrafficType::EmergencyAlert => QoSClass::Critical,
+            
+            // High - priority queue, sent in next available slot
+            TrafficType::GaitAnomaly => QoSClass::High,
+            TrafficType::StumblePrecursor => QoSClass::High,
+            TrafficType::IntrusionAlert => QoSClass::High,
+            
+            // Medium - normal scheduled slot
+            TrafficType::PresenceDetection => QoSClass::Medium,
+            TrafficType::TrackingUpdate => QoSClass::Medium,
+            TrafficType::AcousticEvent => QoSClass::Medium,
+            
+            // Low - sent only when bandwidth available
+            TrafficType::BatteryStatus => QoSClass::Low,
+            TrafficType::HealthTelemetry => QoSClass::Low,
+            TrafficType::ConfigurationSync => QoSClass::Low,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum TrafficType {
+    // Critical
+    ExtremeVelocityDetection,
+    FallDetection,
+    EmergencyAlert,
+    
+    // High
+    GaitAnomaly,
+    StumblePrecursor,
+    IntrusionAlert,
+    
+    // Medium
+    PresenceDetection,
+    TrackingUpdate,
+    AcousticEvent,
+    
+    // Low
+    BatteryStatus,
+    HealthTelemetry,
+    ConfigurationSync,
+}
+```
+
+### 5.2 QoS Implementation
+
+```rust
+/// QoS-aware message queue
+pub struct QosMessageQueue {
+    critical_queue: VecDeque<BanMessage>,
+    high_queue: VecDeque<BanMessage>,
+    medium_queue: VecDeque<BanMessage>,
+    low_queue: VecDeque<BanMessage>,
+}
+
+impl QosMessageQueue {
+    /// Enqueue message with appropriate priority
+    pub fn enqueue(&mut self, message: BanMessage) {
+        let qos = message.qos_class();
+        match qos {
+            QoSClass::Critical => self.critical_queue.push_back(message),
+            QoSClass::High => self.high_queue.push_back(message),
+            QoSClass::Medium => self.medium_queue.push_back(message),
+            QoSClass::Low => self.low_queue.push_back(message),
+        }
+    }
+    
+    /// Get next message to transmit
+    /// Critical messages are always sent first, even if it means preempting
+    pub fn get_next(&mut self, can_preempt: bool) -> Option<BanMessage> {
+        // Critical messages preempt everything
+        if let Some(msg) = self.critical_queue.pop_front() {
+            return Some(msg);
+        }
+        
+        // If preemption not allowed, check reserved slot timing
+        if !can_preempt {
+            return None;
+        }
+        
+        // High priority next
+        if let Some(msg) = self.high_queue.pop_front() {
+            return Some(msg);
+        }
+        
+        // Medium priority
+        if let Some(msg) = self.medium_queue.pop_front() {
+            return Some(msg);
+        }
+        
+        // Low priority only if bandwidth available
+        self.low_queue.pop_front()
+    }
+    
+    /// Check if critical message is pending
+    pub fn has_critical(&self) -> bool {
+        !self.critical_queue.is_empty()
+    }
+    
+    /// Get queue depths for monitoring
+    pub fn get_depths(&self) -> (usize, usize, usize, usize) {
+        (
+            self.critical_queue.len(),
+            self.high_queue.len(),
+            self.medium_queue.len(),
+            self.low_queue.len(),
+        )
+    }
+}
+```
+
+### 5.3 Critical Preemption for Extreme Velocity
+
+```rust
+/// Handle critical alert with immediate transmission
+impl BanRadio {
+    /// Send critical alert, preempting other traffic
+    pub fn send_critical_alert(&mut self, alert: AlertClass, details: AlertDetails) -> Result<(), BanError> {
+        // Create critical message
+        let message = BanMessage::Alert {
+            timestamp_ms: self.get_timestamp_ms(),
+            alert_class: alert,
+            priority: AlertPriority::Critical,
+            source_node: self.node_id,
+            description: details.description,
+        };
+        
+        // If we're in the middle of another transmission,
+        // abort it and send critical immediately
+        if self.is_transmitting() && self.current_message_qos() < QoSClass::Critical {
+            self.abort_transmission();
+        }
+        
+        // Use reserved critical slot if available
+        // Otherwise transmit immediately on next BLE event
+        self.transmit_immediate(message)
+    }
+}
+```
+
+### 5.4 QoS Configuration
+
+```toml
+[ban.qos]
+# Enable QoS prioritization
+enabled = true
+
+# Critical class configuration
+[ban.qos.critical]
+preempt_other_traffic = true
+max_latency_ms = 5
+use_reserved_slot = true
+traffic_types = ["extreme_velocity", "fall_detection", "emergency_alert"]
+
+# High class configuration
+[ban.qos.high]
+max_latency_ms = 20
+traffic_types = ["gait_anomaly", "stumble_precursor", "intrusion_alert"]
+
+# Medium class configuration
+[ban.qos.medium]
+max_latency_ms = 50
+traffic_types = ["presence_detection", "tracking_update", "acoustic_event"]
+
+# Low class configuration
+[ban.qos.low]
+max_latency_ms = 500
+traffic_types = ["battery_status", "health_telemetry", "config_sync"]
+```
+
+---
+
+## 6. Antenna Diversity — Reliability Enhancement
+
+### 6.1 Why Antenna Diversity
+
+The human body is a significant RF absorber at 2.4 GHz:
+- Torso absorption: 10-30 dB attenuation
+- Arm position changes: 5-15 dB variation
+- Orientation changes: 10-20 dB variation
+
+Single antenna configurations suffer from:
+- Body shadowing (blocked signal when body is between antenna and target)
+- Fading (signal strength variation with movement)
+- Higher packet loss (leading to retries and increased latency)
+
+**Antenna diversity** uses two physically separated antennas and switches between them to select the one with better signal quality.
+
+### 6.2 Antenna Diversity Driver
+
+```rust
+/// Antenna diversity driver for improved BLE reliability
+pub struct AntennaDiversityDriver {
+    /// RF switch for antenna selection
+    switch: RfSwitch,
+    /// Current active antenna
+    current_antenna: Antenna,
+    /// RSSI history for each antenna
+    rssi_history: [[i16; 8]; 2],  // [antenna_left, antenna_right]
+    /// Configuration
+    config: AntennaDiversityConfig,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Antenna {
+    Left,
+    Right,
+}
+
+#[derive(Clone, Debug)]
+pub struct AntennaDiversityConfig {
+    /// Minimum RSSI difference before switching (hysteresis)
+    pub switch_threshold_db: i16,
+    /// Number of samples to consider for decision
+    pub history_depth: usize,
+    /// Preferred antenna for initial selection
+    pub preferred_antenna: Antenna,
+    /// Enable diversity (can be disabled for power saving)
+    pub enabled: bool,
+}
+
+impl Default for AntennaDiversityConfig {
+    fn default() -> Self {
+        Self {
+            switch_threshold_db: 5,
+            history_depth: 8,
+            preferred_antenna: Antenna::Left,
+            enabled: true,
+        }
+    }
+}
+
+impl AntennaDiversityDriver {
+    /// Create new diversity driver
+    pub fn new(switch: RfSwitch, config: AntennaDiversityConfig) -> Self {
+        Self {
+            switch,
+            current_antenna: config.preferred_antenna,
+            rssi_history: [[-100i16; 8]; 2],
+            config,
+        }
+    }
+    
+    /// Record RSSI sample for current antenna
+    pub fn record_rssi(&mut self, rssi_db: i16) {
+        let idx = self.rssi_history[self.current_antenna as usize]
+            .iter()
+            .position(|&r| r == -100)
+            .unwrap_or(0);
+        
+        self.rssi_history[self.current_antenna as usize][idx % 8] = rssi_db;
+        
+        // Check if we should switch antennas
+        self.evaluate_switch();
+    }
+    
+    /// Evaluate whether to switch antennas
+    fn evaluate_switch(&mut self) {
+        if !self.config.enabled {
+            return;
+        }
+        
+        // Calculate average RSSI for each antenna
+        let avg_left = self.average_rssi(Antenna::Left);
+        let avg_right = self.average_rssi(Antenna::Right);
+        
+        // Determine if other antenna is significantly better
+        let (other_antenna, improvement) = match self.current_antenna {
+            Antenna::Left => (Antenna::Right, avg_right - avg_left),
+            Antenna::Right => (Antenna::Left, avg_left - avg_right),
+        };
+        
+        if improvement > self.config.switch_threshold_db {
+            self.switch_to(other_antenna);
+        }
+    }
+    
+    /// Switch to specified antenna
+    fn switch_to(&mut self, antenna: Antenna) {
+        self.switch.select(antenna);
+        self.current_antenna = antenna;
+    }
+    
+    /// Calculate average RSSI for an antenna
+    fn average_rssi(&self, antenna: Antenna) -> i16 {
+        let history = &self.rssi_history[antenna as usize];
+        let valid_samples: Vec<i16> = history.iter().filter(|&&r| r > -100).copied().collect();
+        
+        if valid_samples.is_empty() {
+            return -100;
+        }
+        
+        valid_samples.iter().sum::<i16>() / valid_samples.len() as i16
+    }
+    
+    /// Get current antenna
+    pub fn current(&self) -> Antenna {
+        self.current_antenna
+    }
+    
+    /// Get signal quality metric (higher = better)
+    pub fn signal_quality(&self) -> i16 {
+        self.average_rssi(self.current_antenna)
+    }
+}
+```
+
+### 6.3 Integration with BLE Driver
+
+```rust
+/// BLE driver with antenna diversity support
+pub struct BleDriverWithDiversity<RADIO: BleRadio, SWITCH: RfSwitch> {
+    radio: RADIO,
+    antenna_diversity: AntennaDiversityDriver,
+}
+
+impl<RADIO: BleRadio, SWITCH: RfSwitch> BleDriverWithDiversity<RADIO, SWITCH> {
+    /// Transmit packet with antenna diversity
+    pub fn transmit(&mut self, packet: &BlePacket) -> Result<(), BleError> {
+        // Record RSSI from last received packet
+        if let Some(rssi) = self.radio.last_rssi() {
+            self.antenna_diversity.record_rssi(rssi);
+        }
+        
+        // Transmit using current best antenna
+        self.radio.transmit(packet)
+    }
+    
+    /// Receive packet with antenna diversity
+    pub fn receive(&mut self) -> Result<Option<BlePacket>, BleError> {
+        let packet = self.radio.receive()?;
+        
+        if let Some(ref pkt) = packet {
+            if let Some(rssi) = pkt.rssi {
+                self.antenna_diversity.record_rssi(rssi);
+            }
+        }
+        
+        Ok(packet)
+    }
+}
+```
+
+### 6.4 Antenna Diversity Configuration
+
+```toml
+[ban.antenna_diversity]
+# Enable antenna diversity (belt node recommended)
+enabled = true
+
+# Number of antennas (1 = single, 2 = diversity)
+antenna_count = 2
+
+# Switch threshold in dB (higher = less frequent switching)
+switch_threshold_db = 5
+
+# Preferred antenna for initial connection
+preferred_antenna = "auto"    # "left" | "right" | "auto"
+
+# Hysteresis to prevent rapid switching
+hysteresis_db = 2
+```
+
+---
+
+## 7. RF Coexistence Firmware
+
+### 7.1 Coexistence Challenges
+
+The belt node operates multiple radios in close proximity:
+- BLE (2.4 GHz)
+- WiFi (2.4 GHz and 5 GHz)
+- Cellular (various bands)
+- UWB (3.1-10.6 GHz, separate from 2.4 GHz)
+
+Primary conflict: BLE and 2.4 GHz WiFi share the same ISM band.
+
+### 7.2 Coexistence Strategies
+
+```rust
+/// RF coexistence manager for belt node
+#[cfg(feature = "belt_node")]
+pub struct RfCoexistenceManager {
+    /// WiFi band preference
+    wifi_prefer_5ghz: bool,
+    /// BLE-WiFi time sharing enabled
+    ble_wifi_timeshare: bool,
+    /// BLE gap during WiFi transmission (ms)
+    ble_gap_ms: u16,
+    /// Current WiFi activity state
+    wifi_active: bool,
+}
+
+#[cfg(feature = "belt_node")]
+impl RfCoexistenceManager {
+    /// Create coexistence manager
+    pub fn new(config: RfCoexistenceConfig) -> Self {
+        Self {
+            wifi_prefer_5ghz: config.wifi_prefer_5ghz,
+            ble_wifi_timeshare: config.ble_wifi_timeshare,
+            ble_gap_ms: config.ble_gap_ms,
+            wifi_active: false,
+        }
+    }
+    
+    /// Notify WiFi activity starting
+    pub fn on_wifi_activity_start(&mut self, ble: &mut BleDriver) {
+        self.wifi_active = true;
+        
+        if self.ble_wifi_timeshare {
+            // Pause BLE during WiFi transmission
+            ble.pause_transmission(self.ble_gap_ms);
+        }
+    }
+    
+    /// Notify WiFi activity ended
+    pub fn on_wifi_activity_end(&mut self, ble: &mut BleDriver) {
+        self.wifi_active = false;
+        
+        if self.ble_wifi_timeshare {
+            ble.resume_transmission();
+        }
+    }
+    
+    /// Check if 5 GHz WiFi should be preferred
+    pub fn should_prefer_5ghz(&self) -> bool {
+        self.wifi_prefer_5ghz
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct RfCoexistenceConfig {
+    pub wifi_prefer_5ghz: bool,
+    pub ble_wifi_timeshare: bool,
+    pub ble_gap_ms: u16,
+}
+
+impl Default for RfCoexistenceConfig {
+    fn default() -> Self {
+        Self {
+            wifi_prefer_5ghz: true,
+            ble_wifi_timeshare: false,
+            ble_gap_ms: 5,
+        }
+    }
+}
+```
+
+### 7.3 RF Coexistence Configuration
+
+```toml
+[rf_coexistence]
+# Prefer 5 GHz WiFi to avoid 2.4 GHz conflict with BLE
+wifi_prefer_5ghz = true
+
+# Enable BLE-WiFi time sharing (only needed if 2.4 GHz WiFi must be used)
+ble_wifi_timeshare = false
+
+# Gap between BLE and WiFi when time sharing
+ble_gap_during_wifi_ms = 5
+```
+
+---
+
+## 8. Target Platforms
 
 ### MCU Targets (Non-Belt Nodes)
 
@@ -251,7 +821,7 @@ impl Default for BleScheduleConfig {
 
 ---
 
-## 6. Workspace Structure
+## 9. Workspace Structure
 
 ```
 firmware/
@@ -282,52 +852,56 @@ firmware/
     │   ├── event_sensor.rs
     │   ├── environmental.rs
     │   ├── haptic.rs
-    │   ├── camera.rs               # Single camera (pendant, bracelet, anklet)
-    │   ├── camera_360.rs           # 360° curved pendant multi-camera
+    │   ├── camera.rs               # Single camera
+    │   ├── camera_360.rs           # 360° multi-camera
     │   ├── storage.rs              # SD card + integrity chain
     │   ├── wifi.rs                 # Belt node only
     │   ├── cellular.rs             # Belt node only
-    │   └── uwb.rs                  # Optional on all nodes
+    │   ├── uwb.rs                  # Optional on all nodes
+    │   └── antenna_diversity.rs    # Belt node recommended
     ├── logic/
     │   ├── mod.rs
     │   ├── body_frame_local.rs
     │   ├── presence_detection.rs
     │   ├── gait_analysis.rs        # On-node gait event detection
-    │   ├── extreme_velocity.rs     # Doppler + event fusion for fast objects
+    │   ├── extreme_velocity.rs     # Doppler + event fusion
     │   ├── recording_manager.rs
     │   ├── power_management.rs
-    │   ├── thermal_management.rs   # Temperature monitoring and throttling
-    │   └── progressive_quality.rs  # Tiered quality for bandwidth adaptation
+    │   ├── thermal_management.rs
+    │   └── progressive_quality.rs  # Tiered quality
     └── ban_radio/
         ├── mod.rs
-        ├── ble_scheduler.rs        # Time-slotted BLE scheduling
+        ├── ble_scheduler.rs        # Time-slotted scheduling
+        ├── ble_qos.rs              # QoS classes and preemption
         ├── uwb_driver.rs           # UWB timing/ranging/bandwidth
-        └── protocol.rs             # BAN message definitions
+        ├── protocol.rs             # BAN message definitions
+        └── rf_coexistence.rs       # Belt node RF coordination
 ```
 
 ---
 
-## 7. Node Binary Descriptions
+## 10. Node Binary Descriptions
 
-### 7.1 Belt Node — MCU Variant (`belt_node.rs`)
+### 10.1 Belt Node — MCU Variant (`belt_node.rs`)
 
 **Role:** Primary compute, BAN hub, **sole external network gateway**, API server.
 
-**Drivers used:** `mmwave.rs`, `imu.rs`, `environmental.rs`, `storage.rs`, `wifi.rs`, `cellular.rs`
+**Drivers used:** `mmwave.rs`, `imu.rs`, `environmental.rs`, `storage.rs`, `wifi.rs`, `cellular.rs`, `antenna_diversity.rs`
 
 **Firmware responsibilities:**
-- **BAN hub:** Coordinates all inter-node communication, time-sync master, BLE scheduler
+- **BAN hub:** Coordinates all inter-node communication, time-sync master, BLE scheduler with QoS
 - **WiFi connectivity:** Connects to home network; serves minimal API server
 - **Cellular SIM:** Maintains LTE connection when configured; forwards alerts
 - **Recording manager:** Aggregates `RecordingAvailable` events from all nodes; manages belt SD storage
-- **Sensor fusion coordination:** Routes all node data to embedded fusion algorithms
+- **Antenna diversity:** Switches between left/right BLE antennas for reliability
+- **RF coexistence:** Manages BLE-WiFi coordination
 
 **Limitations (MCU variant):**
 - No dense SLAM (insufficient compute)
 - Limited camera stream handling (1-2 streams)
 - Minimal API server (REST only, no WebSocket)
 
-### 7.2 Belt Node — Linux SoM Variant (`belt_node_linux.rs`)
+### 10.2 Belt Node — Linux SoM Variant (`belt_node_linux.rs`)
 
 **Role:** Full capability belt node with SLAM, 360° processing, complete API server.
 
@@ -340,7 +914,7 @@ firmware/
 - **Progressive quality:** Receives tiered streams from 360° pendant, reconstructs high quality
 - **Thermal management:** Monitors enclosure temperature, throttles SLAM if needed
 
-### 7.3 Pendant Node — Standard/Medallion (`pendant_node.rs`)
+### 10.3 Pendant Node — Standard/Medallion (`pendant_node.rs`)
 
 **Drivers:** `mmwave.rs`, `imu.rs`, `acoustic.rs`, `camera.rs` (optional), `storage.rs` (optional), `uwb.rs` (optional)
 
@@ -358,7 +932,7 @@ firmware/
 - Idle (sensors active, radio low-power): 50-100 mW
 - Sleep (minimal): <10 mW
 
-### 7.4 Pendant Node — 360° Curved (`pendant_360.rs`)
+### 10.4 Pendant Node — 360° Curved (`pendant_360.rs`)
 
 **Drivers:** `mmwave.rs`, `imu.rs`, `acoustic.rs`, `camera_360.rs`, `storage.rs`, `uwb.rs`
 
@@ -377,14 +951,15 @@ firmware/
 ```rust
 /// Hardware-synced camera capture
 pub struct Camera360Capture {
-    cameras: [CameraDriver; 8],
+    cameras: [CameraDriver; MAX_CAMERAS],
+    camera_count: usize,
     fsync_gpio: GpioPin<Output<PushPull>>,
     calibration: CalibrationData,
 }
 
 impl Camera360Capture {
-    /// Capture all cameras simultaneously
-    pub fn capture_sync(&mut self) -> Result<[Frame; 8], CaptureError> {
+    /// Capture all cameras simultaneously with hardware sync
+    pub fn capture_sync(&mut self) -> Result<[Frame; MAX_CAMERAS], CameraError> {
         // Assert FSYNC - all cameras start exposure simultaneously
         self.fsync_gpio.set_high();
         
@@ -395,8 +970,8 @@ impl Camera360Capture {
         self.fsync_gpio.set_low();
         
         // Read frames from all cameras
-        let mut frames = [Frame::empty(); 8];
-        for (i, camera) in self.cameras.iter_mut().enumerate() {
+        let mut frames = [Frame::empty(); MAX_CAMERAS];
+        for (i, camera) in self.cameras.iter_mut().enumerate().take(self.camera_count) {
             frames[i] = camera.read_frame()?;
         }
         
@@ -409,36 +984,41 @@ impl Camera360Capture {
 ```rust
 /// Tiered progressive quality configuration
 #[derive(Clone, Copy, Debug)]
-pub enum ProgressiveQualityPhase {
-    /// Instant baseline: all cameras at QVGA
+pub enum QualityTier {
+    /// Instant baseline: QVGA from all cameras
     Baseline,
-    /// Progressive refinement: sequential keyframes at higher res
-    Refinement,
-    /// Continuous improvement
-    Continuous,
+    /// Standard: VGA from all cameras
+    Standard,
+    /// High: 720p keyframes
+    High,
+    /// Progressive: QVGA baseline + high-res keyframes
+    Progressive,
 }
 
 impl Camera360Capture {
     /// Encode with tiered quality
     pub fn encode_progressive(
         &mut self,
-        frames: [Frame; 8],
-        phase: ProgressiveQualityPhase,
+        frames: &[Frame],
+        tier: QualityTier,
         available_bandwidth_bps: u32,
-    ) -> Result<Vec<u8>, EncodeError> {
-        match phase {
-            ProgressiveQualityPhase::Baseline => {
-                // All cameras at QVGA, MJPEG
+    ) -> Result<EncodedStream, EncodeError> {
+        match tier {
+            QualityTier::Baseline => {
+                // All cameras at QVGA, MJPEG (~500 Kbps total)
                 self.encode_all_at_resolution(Resolution::QVGA, Codec::MJPEG)
             }
-            ProgressiveQualityPhase::Refinement => {
-                // Select subset of cameras for high-res keyframes
-                // Based on available bandwidth
-                let cameras_to_refine = (available_bandwidth_bps / 500_000) as usize;
-                self.encode_keyframes(cameras_to_refine.min(8), Resolution::P720, Codec::H264)
+            QualityTier::Standard => {
+                // All cameras at VGA, H.264 (~2-4 Mbps total)
+                self.encode_all_at_resolution(Resolution::VGA, Codec::H264)
             }
-            ProgressiveQualityPhase::Continuous => {
-                // Maintain baseline + periodic refinements
+            QualityTier::High => {
+                // Subset at 720p
+                let cameras_to_encode = (available_bandwidth_bps / 500_000).min(8) as usize;
+                self.encode_keyframes(cameras_to_encode, Resolution::P720, Codec::H264)
+            }
+            QualityTier::Progressive => {
+                // Baseline + periodic refinements
                 self.encode_continuous()
             }
         }
@@ -446,7 +1026,7 @@ impl Camera360Capture {
 }
 ```
 
-### 7.5 Pendant Node — Event-Enhanced (Variant E)
+### 10.5 Pendant Node — Event-Enhanced (Variant E)
 
 **Additional drivers:** `mmwave_doppler.rs`, `event_sensor.rs`
 
@@ -472,15 +1052,22 @@ pub fn extreme_velocity_loop(
                 if let Some(event_track) = event_cam.poll_fast_transient() {
                     // Confirm with event camera trajectory
                     if event_track.confidence > 0.8 {
-                        // Alert belt immediately
-                        ban.send_alert(AlertClass::FastObjectDetected {
+                        // Create critical alert (QoS = Critical)
+                        let alert = BanMessage::FastObjectDetection {
+                            timestamp_us: detection.timestamp_us,
+                            node_id: ban.node_id(),
                             velocity_ms: detection.velocity_ms,
-                            bearing_rad: detection.bearing,
-                            distance_m: detection.range,
-                        });
+                            bearing_rad: detection.bearing_rad,
+                            elevation_rad: detection.elevation_rad,
+                            range_m: detection.range_m,
+                            confidence: detection.confidence,
+                        };
+                        
+                        // Send with QoS Critical - preempts other traffic
+                        ban.send_critical(alert)?;
                         
                         // Capture high-res from conventional cameras
-                        let frames = conventional_cams.capture_sync();
+                        let frames = conventional_cams.capture_sync()?;
                         ban.send_frames_high_priority(&frames);
                     }
                 }
@@ -493,7 +1080,7 @@ pub fn extreme_velocity_loop(
 }
 ```
 
-### 7.6 Bracelet Nodes (`bracelet_left.rs`, `bracelet_right.rs`)
+### 10.6 Bracelet Nodes (`bracelet_left.rs`, `bracelet_right.rs`)
 
 **Drivers:** `mmwave.rs`, `imu.rs`, `haptic.rs`, optional `camera.rs`, optional `uwb.rs`
 
@@ -510,18 +1097,14 @@ pub fn encode_haptic_direction(
     approach_bearing_rad: f32,
     approach_elevation_rad: f32,
 ) -> HapticPattern {
-    // Which bracelet should fire?
-    let left_bearing = if approach_bearing_rad > std::f32::consts::PI {
-        (2.0 * std::f32::consts::PI) - approach_bearing_rad
-    } else {
-        approach_bearing_rad
-    };
+    // Determine which bracelet should fire based on approach direction
+    // Left bracelet: bearing ~PI to 2PI (left side)
+    // Right bracelet: bearing ~0 to PI (right side)
     
-    let right_bearing = approach_bearing_rad;
+    let is_left_side = approach_bearing_rad > std::f32::consts::FRAC_PI_2 
+        && approach_bearing_rad < 1.5 * std::f32::consts::PI;
     
-    // Left bracelet fires for left-side approaches (bearing ~PI to 2PI)
-    // Right bracelet fires for right-side approaches (bearing ~0 to PI)
-    if left_bearing > std::f32::consts::FRAC_PI_2 && left_bearing < 1.5 * std::f32::consts::PI {
+    if is_left_side {
         HapticPattern::LeftWrist {
             intensity: calculate_intensity(approach_elevation_rad),
             pattern: PulsePattern::Double,
@@ -535,7 +1118,7 @@ pub fn encode_haptic_direction(
 }
 ```
 
-### 7.7 Anklet Nodes (`anklet_left.rs`, `anklet_right.rs`)
+### 10.7 Anklet Nodes (`anklet_left.rs`, `anklet_right.rs`)
 
 **Drivers:** `lidar_tof.rs`, `imu.rs`, `haptic.rs`, optional `camera.rs`, `uwb.rs` (recommended)
 
@@ -552,7 +1135,7 @@ pub fn encode_haptic_direction(
 pub struct GaitAnalyzer {
     imu: ImuDriver,
     heel_strike_threshold_g: f32,
-    stride_samples: CircularBuffer<[ImuSample; 200]>,
+    stride_samples: CircularBuffer<ImuSample, 200>,
 }
 
 impl GaitAnalyzer {
@@ -569,7 +1152,7 @@ impl GaitAnalyzer {
             return Some(GaitEvent {
                 event_type: GaitEventType::HeelStrike,
                 phase: gait_phase,
-                impact_g: (accel_magnitude * 10.0) as u8, // Convert to 0-255 scale
+                impact_g: (accel_magnitude * 10.0) as u8,
                 timestamp_ms: sample.timestamp_ms,
             });
         }
@@ -579,14 +1162,14 @@ impl GaitAnalyzer {
     
     /// Detect pre-stumble signature
     pub fn detect_stumble_risk(&self) -> Option<StumblePrecursor> {
-        // Analyze recent stride patterns
-        // Look for: irregular cadence, asymmetry, reduced clearance
+        // Analyze recent stride patterns for irregularity
         // ...
+        None
     }
 }
 ```
 
-### 7.8 Eyewear Node (`eyewear_node.rs`)
+### 10.8 Eyewear Node (`eyewear_node.rs`)
 
 **Drivers:** `event_sensor.rs`, `imu.rs`, optional `camera.rs`, optional `uwb.rs`
 
@@ -622,15 +1205,16 @@ impl HeadOrientationTracker {
     pub fn transform_detection_to_torso(&self, detection: &Detection) -> Detection {
         // Apply head-to-torso transform
         // ...
+        detection.clone()
     }
 }
 ```
 
 ---
 
-## 8. Driver Layer
+## 11. Driver Layer
 
-### 8.1 `mmwave.rs` — Standard mmWave Radar
+### 11.1 `mmwave.rs` — Standard mmWave Radar
 
 ```rust
 /// mmWave radar driver for presence detection
@@ -640,13 +1224,8 @@ pub struct MmWaveDriver<SPI: SpiDevice> {
 }
 
 impl<SPI: SpiDevice> MmWaveDriver<SPI> {
-    /// Initialize radar
     pub fn init(&mut self) -> Result<(), RadarError>;
-    
-    /// Perform single scan
     pub fn scan(&mut self) -> Result<RadarScan, RadarError>;
-    
-    /// Get micro-Doppler activity signature
     pub fn get_micro_doppler(&mut self) -> Result<MicroDopplerSignature, RadarError>;
 }
 
@@ -664,50 +1243,35 @@ pub struct RadarDetection {
 }
 ```
 
-### 8.2 `mmwave_doppler.rs` — Extended Doppler for Extreme Velocity
+### 11.2 `mmwave_doppler.rs` — Extended Doppler for Extreme Velocity
 
 ```rust
 /// Doppler radar driver configured for extreme velocity detection
 pub struct DopplerRadarDriver<SPI: SpiDevice> {
     spi: SPI,
     config: DopplerConfig,
-    /// Extended velocity range: can detect up to max_velocity_ms
     max_velocity_ms: f32,
 }
 
-/// Doppler configuration for projectile detection
 #[derive(Clone, Copy, Debug)]
 pub struct DopplerConfig {
     /// Maximum velocity to detect (m/s)
-    /// Standard automotive: ~18 m/s
-    /// Extended for projectiles: 300+ m/s
+    /// Standard: ~18 m/s, Extended: 300+ m/s
     pub max_velocity_ms: f32,
-    
-    /// Range resolution tradeoff (higher velocity = lower resolution)
+    /// Range resolution tradeoff
     pub range_resolution_m: f32,
-    
     /// Update rate (Hz) - higher for fast transients
     pub update_rate_hz: u32,
-    
     /// CW mode for zero latency
     pub cw_mode: bool,
 }
 
 impl<SPI: SpiDevice> DopplerRadarDriver<SPI> {
-    /// Configure radar for extended velocity range
-    /// This trades range resolution for velocity range
-    pub fn configure_extended(&mut self, max_velocity_ms: f32) -> Result<(), RadarError> {
-        // Calculate chirp parameters for extended Doppler
-        // ...
-        self.max_velocity_ms = max_velocity_ms;
-        Ok(())
-    }
+    /// Configure for extended velocity range
+    pub fn configure_extended(&mut self, max_velocity_ms: f32) -> Result<(), RadarError>;
     
     /// Poll for high-velocity detection
-    pub fn poll_high_velocity(&mut self) -> Option<HighVelocityDetection> {
-        // Check for Doppler shifts corresponding to fast objects
-        // ...
-    }
+    pub fn poll_high_velocity(&mut self) -> Option<HighVelocityDetection>;
 }
 
 pub struct HighVelocityDetection {
@@ -719,7 +1283,7 @@ pub struct HighVelocityDetection {
 }
 ```
 
-### 8.3 `camera_360.rs` — 360° Multi-Camera Array
+### 11.3 `camera_360.rs` — 360° Multi-Camera Array
 
 ```rust
 /// 360° camera array driver
@@ -728,44 +1292,12 @@ pub struct Camera360Driver {
     camera_count: usize,
     fsync_gpio: GpioPin<Output<PushPull>>,
     calibration: CalibrationData,
-    vision_processor: VisionProcessorInterface,
-}
-
-/// Calibration data for 360° stitching
-#[derive(Clone, Debug, Deserialize)]
-pub struct CalibrationData {
-    /// Intrinsic parameters per camera
-    pub intrinsics: Vec<CameraIntrinsics>,
-    /// Extrinsic parameters (position relative to pendant center)
-    pub extrinsics: Vec<CameraExtrinsics>,
-    /// Stitching parameters
-    pub stitching: StitchingConfig,
-}
-
-#[derive(Clone, Copy, Debug)]
-pub struct CameraIntrinsics {
-    pub focal_length_px: f32,
-    pub principal_point: (f32, f32),
-    pub distortion: [f32; 5],
-}
-
-#[derive(Clone, Copy, Debug)]
-pub struct CameraExtrinsics {
-    pub rotation: [[f32; 3]; 3],
-    pub translation: [f32; 3],
 }
 
 impl Camera360Driver {
-    /// Initialize all cameras
     pub fn init(&mut self) -> Result<(), CameraError>;
-    
-    /// Capture all cameras with hardware sync
     pub fn capture_sync(&mut self) -> Result<[Frame; MAX_CAMERAS], CameraError>;
-    
-    /// Load calibration from flash
     pub fn load_calibration(&mut self) -> Result<CalibrationData, StorageError>;
-    
-    /// Encode with tiered quality
     pub fn encode_tiered(
         &mut self,
         frames: &[Frame],
@@ -774,55 +1306,37 @@ impl Camera360Driver {
     ) -> Result<EncodedStream, EncodeError>;
 }
 
-/// Quality tiers for bandwidth adaptation
 #[derive(Clone, Copy, Debug)]
 pub enum QualityTier {
-    /// Instant baseline: QVGA from all cameras (~500 Kbps)
-    Baseline,
-    /// Standard: VGA from all cameras (~2-4 Mbps)
-    Standard,
-    /// High: 720p keyframes (~4-6 Mbps)
-    High,
-    /// Progressive: QVGA baseline + high-res keyframes
-    Progressive,
+    Baseline,    // QVGA all cameras
+    Standard,    // VGA all cameras
+    High,        // 720p keyframes
+    Progressive, // QVGA + progressive refinement
 }
 ```
 
-### 8.4 `wifi.rs` — Belt Node Only
+### 11.4 `wifi.rs` — Belt Node Only
 
 ```rust
-/// WiFi driver - BELT NODE ONLY
 #[cfg(feature = "belt_node")]
 pub struct WifiDriver {
     #[cfg(target_os = "linux")]
     interface: String,
-    #[cfg(not(target_os = "linux"))]
-    esp_at: EspAtDriver,
 }
 
 #[cfg(feature = "belt_node")]
 impl WifiDriver {
-    /// Connect to access point
     pub fn connect(&mut self, ssid: &str, password: &str) -> Result<(), WifiError>;
-    
-    /// Check if connected
     pub fn is_connected(&self) -> bool;
-    
-    /// Get local IP
     pub fn get_local_ip(&self) -> Option<Ipv4Addr>;
-    
-    /// Get signal strength
     pub fn get_rssi(&self) -> Option<i32>;
-    
-    /// Prefer 5 GHz band for BLE coexistence
     pub fn prefer_5ghz(&mut self, prefer: bool);
 }
 ```
 
-### 8.5 `cellular.rs` — Belt Node Only
+### 11.5 `cellular.rs` — Belt Node Only
 
 ```rust
-/// Cellular SIM driver - BELT NODE ONLY
 #[cfg(feature = "belt_node")]
 pub struct CellularDriver<UART: SerialPort> {
     uart: UART,
@@ -832,146 +1346,85 @@ pub struct CellularDriver<UART: SerialPort> {
 
 #[cfg(feature = "belt_node")]
 impl<UART: SerialPort> CellularDriver<UART> {
-    /// Power on cellular module
     pub fn power_on(&mut self) -> Result<(), CellularError>;
-    
-    /// Register to network
     pub fn register(&mut self) -> Result<(), CellularError>;
-    
-    /// Check if registered
     pub fn is_registered(&self) -> bool;
-    
-    /// Get signal strength (dBm)
     pub fn get_signal_strength(&mut self) -> Result<i32, CellularError>;
-    
-    /// Get carrier name
     pub fn get_carrier(&mut self) -> Result<String, CellularError>;
-    
-    /// Send AT command
     pub fn send_at(&mut self, cmd: &str) -> Result<String, CellularError>;
-    
-    /// Send alert to endpoint
     pub fn send_alert(&mut self, endpoint: &str, payload: &[u8]) -> Result<(), CellularError>;
-    
-    /// Check SIM presence
     pub fn check_sim(&mut self) -> Result<SimStatus, CellularError>;
-}
-
-pub enum SimStatus {
-    Present { sim_type: SimType },
-    NotPresent,
-    Error,
-}
-
-pub enum SimType {
-    NanoSim,
-    ESIM,
 }
 ```
 
-### 8.6 `uwb.rs` — Optional on All Nodes
+### 11.6 `uwb.rs` — Optional on All Nodes
 
 ```rust
-/// UWB driver for timing, ranging, and bandwidth augmentation
 pub struct UwbDriver<SPI: SpiDevice> {
     spi: SPI,
     config: UwbConfig,
     role: UwbRole,
 }
 
-/// UWB role configuration
 #[derive(Clone, Copy, Debug)]
 pub enum UwbRole {
-    /// Time synchronization only (lowest power)
     TimingOnly,
-    /// Timing + ranging between nodes
     TimingAndRanging,
-    /// Full bandwidth capability
     FullBandwidth,
 }
 
-#[derive(Clone, Copy, Debug)]
-pub struct UwbConfig {
-    /// UWB channel (1-9, typically 5 or 9 for UWB)
-    pub channel: u8,
-    /// Preamble length
-    pub preamble_length: PreambleLength,
-    /// Maximum sustained bandwidth target
-    pub max_bandwidth_mbps: f32,
-    /// Power mode
-    pub power_mode: UwbPowerMode,
-}
-
 impl<SPI: SpiDevice> UwbDriver<SPI> {
-    /// Initialize UWB
     pub fn init(&mut self) -> Result<(), UwbError>;
-    
-    /// Time synchronization exchange
     pub fn time_sync_exchange(&mut self) -> Result<TimeSyncResult, UwbError>;
-    
-    /// Measure range to another node
     pub fn measure_range(&mut self, target: NodeId) -> Result<f32, UwbError>;
-    
-    /// Send burst data
     pub fn send_burst(&mut self, data: &[u8]) -> Result<(), UwbError>;
-    
-    /// Start continuous stream (up to max_bandwidth_mbps)
     pub fn start_stream(&mut self) -> Result<(), UwbError>;
-    
-    /// Check if stream bandwidth is available
     pub fn check_bandwidth(&self) -> f32;
-}
-
-pub struct TimeSyncResult {
-    pub offset_ns: i64,
-    pub skew_ppm: f32,
-    pub confidence: f32,
 }
 ```
 
-### 8.7 `storage.rs` — Any Node With SD Card
+### 11.7 `antenna_diversity.rs` — Belt Node Recommended
 
 ```rust
-/// Storage driver for SD card with integrity chain
+pub struct AntennaDiversityDriver {
+    switch: RfSwitch,
+    current_antenna: Antenna,
+    rssi_history: [[i16; 8]; 2],
+    config: AntennaDiversityConfig,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Antenna {
+    Left,
+    Right,
+}
+
+impl AntennaDiversityDriver {
+    pub fn new(switch: RfSwitch, config: AntennaDiversityConfig) -> Self;
+    pub fn record_rssi(&mut self, rssi_db: i16);
+    pub fn current(&self) -> Antenna;
+    pub fn signal_quality(&self) -> i16;
+}
+```
+
+### 11.8 `storage.rs` — Any Node With SD Card
+
+```rust
 pub struct StorageDriver<SPI: SpiDevice> {
     spi: SPI,
     sd_card: SdCard,
     config: StorageConfig,
 }
 
-#[derive(Clone, Debug)]
-pub struct StorageConfig {
-    /// Maximum storage in MB (0 = unlimited)
-    pub max_storage_mb: u64,
-    /// Retention in days (0 = forever)
-    pub retention_days: u32,
-    /// Enable integrity chain
-    pub enable_integrity: bool,
-    /// Storage target
-    pub target: StorageTarget,
-}
-
 impl<SPI: SpiDevice> StorageDriver<SPI> {
-    /// Initialize SD card
     pub fn init(&mut self) -> Result<(), StorageError>;
-    
-    /// Open recording for writing
     pub fn open_recording(&mut self, path: &str) -> Result<RecordingWriter, StorageError>;
-    
-    /// List recordings
     pub fn list_recordings(&self) -> Result<Vec<RecordingMetadata>, StorageError>;
-    
-    /// Delete recording
     pub fn delete_recording(&mut self, path: &str) -> Result<(), StorageError>;
-    
-    /// Enforce retention policy
     pub fn enforce_retention(&mut self) -> Result<u64, StorageError>;
-    
-    /// Get used storage in MB
     pub fn get_used_mb(&self) -> u64;
 }
 
-/// Recording writer with integrity chain
 pub struct RecordingWriter<'a> {
     file: File<'a>,
     hasher: Sha256,
@@ -979,38 +1432,24 @@ pub struct RecordingWriter<'a> {
 }
 
 impl<'a> RecordingWriter<'a> {
-    /// Write frame to recording
     pub fn write_frame(&mut self, frame: &[u8]) -> Result<(), StorageError>;
-    
-    /// Close recording and generate integrity manifest
     pub fn close(self) -> Result<RecordingMetadata, StorageError>;
-}
-
-pub struct RecordingMetadata {
-    pub path: String,
-    pub start_time_ms: u64,
-    pub duration_ms: u32,
-    pub size_bytes: u64,
-    pub sha256: [u8; 32],
-    pub integrity_manifest: IntegrityManifest,
 }
 ```
 
 ---
 
-## 9. BAN Protocol Stack
+## 12. BAN Protocol Stack
 
-### 9.1 Protocol Overview
+### 12.1 Protocol Overview
 
 All inter-node communication uses the Body-Area Network (BAN) protocol. External connectivity (WiFi, cellular) is handled exclusively by the belt node.
 
-### 9.2 Message Definitions
+### 12.2 Message Definitions
 
 ```rust
-/// All BAN messages
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum SentinelBanMessage {
-    // === Sensor Data ===
     NodeSensorData {
         timestamp_ms: u64,
         node_id: NodeId,
@@ -1021,7 +1460,6 @@ pub enum SentinelBanMessage {
         audio_clip_path: Option<String>,
     },
     
-    // === Detections ===
     Detection {
         timestamp_ms: u64,
         node_id: NodeId,
@@ -1032,7 +1470,6 @@ pub enum SentinelBanMessage {
         classification: ClassificationHint,
     },
     
-    // === Gait Events ===
     GaitEvent {
         timestamp_ms: u64,
         node_id: NodeId,
@@ -1042,7 +1479,6 @@ pub enum SentinelBanMessage {
         impact_g: Option<u8>,
     },
     
-    // === Acoustic Events ===
     AcousticEvent {
         timestamp_ms: u64,
         node_id: NodeId,
@@ -1052,7 +1488,6 @@ pub enum SentinelBanMessage {
         audio_clip_path: Option<String>,
     },
     
-    // === Identification ===
     IdentificationResult {
         timestamp_ms: u64,
         node_id: NodeId,
@@ -1063,7 +1498,6 @@ pub enum SentinelBanMessage {
         clip_duration_s: Option<f32>,
     },
     
-    // === Extreme Velocity ===
     FastObjectDetection {
         timestamp_us: u64,
         node_id: NodeId,
@@ -1074,7 +1508,6 @@ pub enum SentinelBanMessage {
         confidence: f32,
     },
     
-    // === Recording Lifecycle ===
     RecordingAvailable {
         node_id: NodeId,
         recording_path: String,
@@ -1087,28 +1520,24 @@ pub enum SentinelBanMessage {
         sha256: String,
     },
     
-    // === Media Streaming ===
     StartStreamToBelt {
         node_id: NodeId,
         format: StreamFormat,
         quality: StreamQuality,
         use_uwb: bool,
     },
+    
     StopStreamToBelt {
         node_id: NodeId,
     },
+    
     StreamData {
         node_id: NodeId,
         timestamp_ms: u64,
         frame_number: u32,
         data: Vec<u8>,
     },
-    StreamEnd {
-        node_id: NodeId,
-        timestamp_ms: u64,
-    },
     
-    // === 360° Panorama ===
     PanoramaFrameAvailable {
         node_id: NodeId,
         timestamp_ms: u64,
@@ -1118,7 +1547,6 @@ pub enum SentinelBanMessage {
         quality_tier: QualityTier,
     },
     
-    // === Alerts ===
     Alert {
         timestamp_ms: u64,
         alert_class: AlertClass,
@@ -1127,7 +1555,6 @@ pub enum SentinelBanMessage {
         description: String,
     },
     
-    // === Haptic Commands ===
     HapticCommand {
         target_node: NodeId,
         pattern: HapticPattern,
@@ -1135,28 +1562,17 @@ pub enum SentinelBanMessage {
         intensity: u8,
     },
     
-    // === Calibration ===
     CalibrationCommand {
         command: CalibrationPhase,
     },
-    CalibrationData {
-        node_id: NodeId,
-        transform: BodyFrameTransform,
-    },
     
-    // === Time Synchronization ===
     TimeSyncExchange {
         t1_ns: u64,
         t2_ns: u64,
         t3_ns: u64,
         t4_ns: u64,
     },
-    TimeSyncUpdate {
-        offset_ns: i64,
-        skew_ppm: f32,
-    },
     
-    // === Health ===
     NodeHealth {
         node_id: NodeId,
         battery_percent: u8,
@@ -1166,83 +1582,36 @@ pub enum SentinelBanMessage {
         sensor_health: Vec<(String, SensorHealthStatus)>,
     },
     
-    // === Configuration ===
     ConfigUpdate {
         node_id: NodeId,
         config_section: String,
         config_data: Vec<u8>,
     },
 }
+```
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
-pub enum DetectionType {
-    RadarPoint,
-    LiDARCluster,
-    AcousticSource,
-    VisualObject,
-}
+### 12.3 QoS Integration in Protocol
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
-pub enum GaitEventType {
-    HeelStrike,
-    ToeOff,
-    StumblePrecursor,
-    FallDetected,
-    GaitIrregularity,
-}
-
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
-pub enum GaitPhase {
-    Stance,
-    Swing,
-    Strike,
-    Push,
-}
-
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
-pub enum AlertClass {
-    HumanApproaching,
-    VehicleNear,
-    GaitAnomaly,
-    FallDetected,
-    FastObjectDetected,
-    SystemAlert,
-}
-
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
-pub enum AlertPriority {
-    Info,
-    Warning,
-    Critical,
-}
-
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
-pub enum HapticPattern {
-    SinglePulse,
-    DoublePulse,
-    TriplePulse,
-    Sustained,
-    RapidPulse,
-}
-
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
-pub enum StreamFormat {
-    H264,
-    H265,
-    MJPEG,
-    RawRGB,
-}
-
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
-pub enum StreamQuality {
-    Low,
-    Medium,
-    High,
-    Raw,
+```rust
+impl SentinelBanMessage {
+    /// Get QoS class for this message
+    pub fn qos_class(&self) -> QoSClass {
+        match self {
+            Self::FastObjectDetection { .. } => QoSClass::Critical,
+            Self::Alert { priority: AlertPriority::Critical, .. } => QoSClass::Critical,
+            Self::GaitEvent { event_type: GaitEventType::FallDetected, .. } => QoSClass::Critical,
+            Self::GaitEvent { event_type: GaitEventType::StumblePrecursor, .. } => QoSClass::High,
+            Self::Alert { priority: AlertPriority::Warning, .. } => QoSClass::High,
+            Self::Detection { .. } => QoSClass::Medium,
+            Self::NodeSensorData { .. } => QoSClass::Medium,
+            Self::NodeHealth { .. } => QoSClass::Low,
+            _ => QoSClass::Medium,
+        }
+    }
 }
 ```
 
-### 9.3 Protocol Timing
+### 12.4 Protocol Timing
 
 ```
 BLE Connection Interval: 30 ms (default, configurable 7.5-1000 ms)
@@ -1261,18 +1630,18 @@ UWB Time Sync (if enabled):
 
 ---
 
-## 10. Power Management
+## 13. Power Management
 
-### 10.1 Power States
+### 13.1 Power States
 
-| State | CPU | Peripherals | BAN Radio | Wake Source | Power (Typical) |
+| State | CPU | Peripherals | BAN Radio | Wake Source | Power |
 |---|---|---|---|---|---|
 | **Active** | Full | All on | Connected | N/A | 200-500 mW |
 | **Idle** | WFI | Sensors active | Connected | Timer, interrupt | 50-100 mW |
 | **Standby** | Off (RAM retained) | Key sensors | Advertising | Radar, timer | 5-20 mW |
 | **Deep Sleep** | Off | RTC only | Off | External interrupt | <1 mW |
 
-### 10.2 Belt Node Power States (Linux SoM)
+### 13.2 Belt Node Power States (Linux SoM)
 
 | State | WiFi | Cellular | SLAM | Streaming | Power |
 |---|---|---|---|---|---|
@@ -1281,19 +1650,14 @@ UWB Time Sync (if enabled):
 | **Full Active** | Streaming | Active | On | On | ~4.5 W |
 | **Remote Streaming** | Off | Streaming | On | On | ~5.3 W |
 
-### 10.3 Power Profile Configuration
+### 13.3 Power Profile Configuration
 
 ```rust
-/// Power profile configuration
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct PowerProfile {
-    /// BLE connection interval (affects latency vs power)
     pub ble_interval: BleInterval,
-    /// Sensor duty cycle (0.0-1.0)
     pub sensor_duty_cycle: f32,
-    /// Camera power management
     pub camera_power: CameraPowerMode,
-    /// UWB power mode
     pub uwb_power: UwbPowerMode,
 }
 
@@ -1304,34 +1668,6 @@ pub enum BleInterval {
     Standard,         // 30 ms
     PowerSaving,      // 100 ms
     Sleep,            // 1000 ms
-}
-
-#[derive(Clone, Copy, Debug)]
-pub enum CameraPowerMode {
-    AlwaysOn,
-    OnDemand,
-    MotionTriggered,
-    Off,
-}
-
-#[derive(Clone, Copy, Debug)]
-pub enum UwbPowerMode {
-    Disabled,
-    TimingOnly,
-    RangingActive,
-    FullBandwidth,
-}
-
-impl From<&str> for PowerProfile {
-    fn from(s: &str) -> Self {
-        match s {
-            "ultra_low_latency" => Self::ultra_low_latency(),
-            "low_latency" => Self::low_latency(),
-            "standard" => Self::standard(),
-            "power_saving" => Self::power_saving(),
-            _ => Self::standard(),
-        }
-    }
 }
 
 impl PowerProfile {
@@ -1352,26 +1688,16 @@ impl PowerProfile {
             uwb_power: UwbPowerMode::TimingOnly,
         }
     }
-    
-    pub fn power_saving() -> Self {
-        Self {
-            ble_interval: BleInterval::PowerSaving,
-            sensor_duty_cycle: 0.25,
-            camera_power: CameraPowerMode::Off,
-            uwb_power: UwbPowerMode::Disabled,
-        }
-    }
 }
 ```
 
 ---
 
-## 11. Thermal Management
+## 14. Thermal Management
 
-### 11.1 Temperature Monitoring
+### 14.1 Temperature Monitoring
 
 ```rust
-/// Thermal management for wearable nodes
 pub struct ThermalManager {
     thermistor: NtcThermistor,
     throttling_threshold_c: f32,
@@ -1379,135 +1705,92 @@ pub struct ThermalManager {
     current_state: ThermalState,
 }
 
-#[derive(Clone, Copy, Debug)]
-pub enum ThermalState {
-    Normal,
-    Throttled { reduction_percent: u8 },
-    Critical,
-}
-
 impl ThermalManager {
-    /// Check temperature and update state
-    pub fn check(&mut self) -> ThermalState {
-        let temp = self.thermistor.read_temperature();
-        
-        if temp > self.shutdown_threshold_c {
-            self.current_state = ThermalState::Critical;
-            // Initiate graceful shutdown
-        } else if temp > self.throttling_threshold_c {
-            let reduction = ((temp - self.throttling_threshold_c) / 5.0 * 100.0) as u8;
-            self.current_state = ThermalState::Throttled {
-                reduction_percent: reduction.min(50),
-            };
-        } else {
-            self.current_state = ThermalState::Normal;
-        }
-        
-        self.current_state
-    }
-    
-    /// Get recommended SLAM frame rate based on thermal state
-    pub fn get_slam_framerate(&self) -> u8 {
-        match self.current_state {
-            ThermalState::Normal => 30,
-            ThermalState::Throttled { reduction_percent } => {
-                (30 * (100 - reduction_percent) / 100) as u8
-            }
-            ThermalState::Critical => 0, // Disable SLAM
-        }
-    }
+    pub fn check(&mut self) -> ThermalState;
+    pub fn get_slam_framerate(&self) -> u8;
 }
 ```
 
-### 11.2 Temperature Thresholds
+### 14.2 Temperature Thresholds
 
 | Node | Throttling | Shutdown | Notes |
 |------|------------|----------|-------|
-| Pendant Standard | 42°C | 50°C | Skin contact limit |
+| Pendant Standard | 42°C | 50°C | Skin contact |
 | Pendant 360° | 40°C | 45°C | Higher thermal load |
 | Belt MCU | 45°C | 55°C | Enclosure interior |
-| Belt Linux SoM | 50°C | 60°C | With active cooling |
+| Belt Linux SoM | 50°C | 60°C | Active cooling |
 | Bracelet | 42°C | 50°C | Skin contact |
-| Anklet | 45°C | 55°C | Less skin sensitivity |
+| Anklet | 45°C | 55°C | Less sensitivity |
 
 ---
 
-## 12. Data Handling — User Configured
+## 15. Data Handling — User Configured
 
-### 12.1 Configuration File
-
-All data handling is user-configured in `sentinel-wear.toml`. The firmware imposes no restrictions.
+### 15.1 Configuration File
 
 ```toml
-# Data handling configuration
 [data]
-# Raw data storage
 store_raw_video = true
 store_raw_audio = false
 store_raw_sensor_data = false
 store_360_panorama = true
-
-# Storage management
-storage_target = "belt_sd_card"       # "belt_sd_card" | "node_local_sd" | "belt_internal"
-retention_days = 30                    # 0 = keep forever
-max_storage_mb = 32768                 # 0 = unlimited
-continuous_recording = false           # Record continuously vs on-trigger
-recording_trigger = "on_detection"     # "always" | "on_detection" | "on_alert" | "manual"
-
-# Integrity
-include_integrity_chain = true         # Generate SHA-256 manifests
-
-# Streaming
+storage_target = "belt_sd_card"
+retention_days = 30
+max_storage_mb = 32768
+continuous_recording = false
+recording_trigger = "on_detection"
+include_integrity_chain = true
 enable_app_streaming = true
-stream_quality = "high"                # "low" | "medium" | "high" | "raw"
+stream_quality = "high"
 
-# 360° pendant specific
 [pendant_360]
 progressive_quality = true
 baseline_resolution = "qvga"
 refinement_resolution = "720p"
 adaptive_bandwidth = true
 
-# Extreme velocity
 [extreme_velocity]
 enabled = true
-mode = "production"                    # "disabled" | "research" | "production"
+mode = "production"
 min_velocity_ms = 50
 max_velocity_ms = 350
 alert_on_detection = true
 
-# Connectivity
 [connectivity]
-# WiFi - belt node only
 wifi_enabled = true
-wifi_ssid = "HomeNetwork"
 wifi_prefer_5ghz = true
 
-# Cellular - belt node only
 [connectivity.cellular]
 enabled = false
 sim_type = "nano_sim"
-apn = "carrier.apn"
+apn = ""
 fallback_to_wifi = true
 always_on_cellular = false
 alert_via_cellular = true
-stream_via_cellular = false
-emergency_contact = ""
 
-# BAN
 [connectivity.ban]
-primary = "ble"                        # "ble" | "uwb" | "hybrid"
-ble_interval = "standard"              # "ultra_low_latency" | "low_latency" | "standard" | "power_saving"
+primary = "ble"
+ble_interval = "standard"
 uwb_enabled = true
 uwb_role = "timing_and_ranging"
 
-# Power
+[ban.qos]
+enabled = true
+
+[ban.antenna_diversity]
+enabled = true
+antenna_count = 2
+switch_threshold_db = 5
+
+[rf_coexistence]
+wifi_prefer_5ghz = true
+ble_wifi_timeshare = false
+
 [power]
-profile = "standard"                   # "ultra_low_latency" | "low_latency" | "standard" | "power_saving"
+profile = "standard"
 thermal_throttling = true
 shutdown_on_overheat = true
 
-# App
 [app]
 enabled = true
 api_port = 8080
@@ -1518,28 +1801,9 @@ remote_access_token = ""
 max_concurrent_streams = 4
 ```
 
-### 12.2 Live Streaming Flow
-
-When the companion app requests a live stream from a pendant camera:
-
-```
-1. Companion app → Belt API: GET /api/nodes/pendant/stream
-2. Belt firmware sends BAN message: StartStreamToBelt { node_id: pendant, format: H264, quality: High, use_uwb: true }
-3. Pendant firmware:
-   a. Starts camera capture
-   b. Encodes frames to H.264
-   c. Sends StreamData messages via BAN (BLE or UWB)
-4. Belt firmware:
-   a. Receives StreamData messages
-   b. Relays to RTSP server on port 9090
-   c. WiFi clients connect to rtsp://belt:9090/pendant
-   d. Or cellular relay for remote access
-5. Pendant never connects to WiFi or cellular
-```
-
 ---
 
-## 13. Build System
+## 16. Build System
 
 ```toml
 [workspace]
@@ -1552,24 +1816,17 @@ edition = "2021"
 
 [features]
 default = []
-
-# Hardware variants
 belt_node = []
 curved_360 = []
 event_enhanced = []
-
-# Optional hardware
 uwb = []
 hw_camera_switch = []
-
-# Belt-only features
 wifi = ["belt_node"]
 cellular = ["belt_node"]
-
-# Linux-only features (belt node SoM variants)
 linux_som = ["belt_node"]
 slam = ["linux_som"]
 full_api = ["linux_som"]
+antenna_diversity = []
 
 [[bin]]
 name = "pendant_node"
@@ -1626,21 +1883,18 @@ name = "eyewear_node"
 path = "src/bin/eyewear_node.rs"
 
 [dependencies]
-# Embedded dependencies (no_std)
+# Embedded
 cortex-m = { version = "0.7", optional = true }
 cortex-m-rt = { version = "0.7", optional = true }
-embedded-hal = { version = "1.0" }
-panic-halt = { version = "0.2", optional = true }
-embedded-sdmmc = { version = "0.7" }
+embedded-hal = "1.0"
+embedded-sdmmc = "0.7"
 sha2 = { version = "0.10", default-features = false }
 serde = { version = "1.0", default-features = false, features = ["derive"] }
-postcard = { version = "1.0" }
+postcard = "1.0"
 
-# Linux dependencies (belt node SoM)
+# Linux
 tokio = { version = "1.0", optional = true }
 axum = { version = "0.7", optional = true }
-tower = { version = "0.4", optional = true }
-tracing = { version = "0.1", optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"
@@ -1648,7 +1902,7 @@ libc = "0.2"
 
 ---
 
-## 14. Legal & Compliance
+## 17. Legal & Compliance
 
 - **Sensing-only effectors:** No actuation path exists in any firmware binary.
 - **Data handling:** User-configured. No firmware-imposed restrictions.
@@ -1656,48 +1910,51 @@ libc = "0.2"
 - **SAR compliance:** Critical for wearable devices. Use only body-worn certified BLE modules.
 - **Recording laws:** Deployer's responsibility. Firmware does not enforce jurisdiction-specific restrictions.
 - **Battery safety:** Hardware protections mandatory. Firmware provides secondary cutoff monitoring.
-- **Integrity chain:** SHA-256 hashes generated for all recordings. Manifests stored with recordings.
-- **Export control:** Encryption in firmware may be subject to export control regulations in some jurisdictions.
+- **Integrity chain:** SHA-256 hashes generated for all recordings.
+- **Export control:** Encryption may be subject to export control regulations.
 
 ---
 
-## 15. Debug & Test
+## 18. Debug & Test
 
-### 15.1 Debug Interfaces
+### 18.1 Debug Interfaces
 
 - **SWD:** 4-pin debug header (SWCLK, SWDIO, nRST, SWO)
 - **RTT:** Non-intrusive logging via Segger RTT
 - **UART:** Debug console at 115200 baud, 8N1
 - **Test mode:** `std` build for host-side unit testing with mock `embedded-hal`
 
-### 15.2 Test Build
+### 18.2 Test Build
 
 ```bash
 # Build for hardware
 cargo build --target thumbv7em-none-eabihf --bin pendant_node --release
 cargo build --target aarch64-unknown-linux-gnu --bin belt_node_linux --release
 
-# Build for testing (std target)
+# Build for testing
 cargo test --features test
 ```
 
-### 15.3 Firmware Verification Tests
+### 18.3 Firmware Verification Tests
 
 | Test | Description | Pass Criteria |
 |------|-------------|---------------|
 | Power-on self-test | MCU boots, CRC verified | All sensors respond |
-| BAN connectivity | Node connects to belt via BLE | < 200 ms association |
+| BAN connectivity | Node connects to belt | < 200 ms association |
 | Time sync | Node syncs clock with belt | Offset < 1 ms |
-| Recording | Capture and store to SD | File exists with integrity manifest |
+| QoS critical | Critical alert transmits immediately | < 5 ms |
+| Antenna diversity | RSSI-based switching | Correct antenna selected |
+| Recording | Capture and store to SD | File with integrity manifest |
 | Streaming | Start/stop stream via BAN | Frames arrive at belt |
-| Thermal | Temperature monitoring | Throttling triggers at threshold |
+| Thermal | Temperature monitoring | Throttling triggers |
 | Cellular (belt only) | AT command response | Module responds < 5 s |
 | WiFi (belt only) | AP association | Connects < 30 s |
 
 ---
 
-## 16. Version History
+## 19. Version History
 
 | Version | Date | Changes |
 |---------|------|---------|
 | 0.1 | 2024-01 | Initial specification |
+| 0.2 | 2024-01 | Added QoS classes, antenna diversity, RF coexistence, enhanced extreme velocity support |
