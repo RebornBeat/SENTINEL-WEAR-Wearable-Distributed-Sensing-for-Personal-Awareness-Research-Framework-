@@ -1,4 +1,3 @@
-```markdown
 # Bracelet Node — Hardware Schematic Reference Design
 
 **Project:** SENTINEL-WEAR
@@ -713,8 +712,3 @@ bracelet_node/
 | Hardware camera switch | Not installed / Installed | Physical power cut |
 
 **All options are configuration choices on the same PCB design.** No separate hardware variants required.
-
----
-
-**End of Bracelet Node Hardware Schematic Reference Design**
-```
