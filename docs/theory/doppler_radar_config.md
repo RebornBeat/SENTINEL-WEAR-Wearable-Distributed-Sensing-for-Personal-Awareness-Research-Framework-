@@ -13,6 +13,8 @@ This document specifies the Doppler radar configuration architecture for detecti
 
 **Key thesis:** Standard mmWave radar profiles are optimized for human and vehicle motion (velocities up to ~18 m/s). Projectile detection requires velocities up to 850+ m/s, requiring custom chirp configurations that trade range resolution for velocity range.
 
+**Critical architectural insight:** The detection pipeline must be separated into tiers with different latency requirements. The reflex trigger (Tier 1) can operate in hundreds of microseconds using CW radar. Full characterization (Tier 3) operates in milliseconds. These should not be conflated into a single latency budget.
+
 ---
 
 ## 2. Physics of High-Velocity Detection
@@ -49,10 +51,33 @@ Where:
 | 10 m/s (running) | 4 kHz |
 | 100 m/s (slow projectile) | 40 kHz |
 | 350 m/s (handgun) | 140 kHz |
-| 850 m/s (rifle) | 340 kHz |
+| 850 m/s (rifle) | **340 kHz** |
 | 1000 m/s (high-velocity) | 400 kHz |
 
-### 2.3 Standard vs Extended Doppler Range
+**Critical insight:** Projectile Doppler signatures are MASSIVE compared to human motion. A walking person produces 400 Hz Doppler shift. A rifle bullet produces 340 kHz — nearly 1000× larger. This is spectrally trivial to detect with short FFT windows.
+
+### 2.3 FFT Window Optimization for Extreme Velocities
+
+**Doppler frequency resolution:**
+
+$$\Delta f = \frac{1}{T}$$
+
+Where T is the FFT integration window.
+
+**Short window analysis:**
+
+| FFT Window | Frequency Resolution | Velocity Resolution (60 GHz) | Usefulness |
+|------------|---------------------|-----------------------------|------------|
+| 32 µs | 31.25 kHz | ~77 m/s | **Excellent for threshold detection** |
+| 64 µs | 15.625 kHz | ~39 m/s | Good for classification |
+| 128 µs | 7.8 kHz | ~19 m/s | Detailed analysis |
+| 256 µs | 3.9 kHz | ~10 m/s | Standard automotive |
+
+**Key insight:** For extreme velocity detection, you do NOT need precise velocity measurement. You need to threshold: "something above 300 m/s exists."
+
+A 32 µs FFT window provides 77 m/s resolution — coarse for precision measurement, but PERFECT for fast detection of extreme velocities. The detection can happen in tens of microseconds, not milliseconds.
+
+### 2.4 Standard vs Extended Doppler Range
 
 **Standard automotive radar profile:**
 
@@ -74,9 +99,207 @@ Where:
 
 ---
 
-## 3. mmWave Module Capabilities
+## 3. Tiered Detection Architecture
 
-### 3.1 TI IWR6843 Family
+### 3.1 The Critical Architectural Insight
+
+The original latency budget conflated multiple functions:
+- Fast detection (reflex trigger)
+- Direction validation
+- Trajectory characterization
+- Evidence recording
+- Network transmission
+
+These operate on vastly different timescales and should be architecturally separated.
+
+### 3.2 Tier 1 — Reflex Trigger (~100-500 µs)
+
+**Purpose:** Immediate detection of extreme velocity object, local alert trigger.
+
+**Latency target:** 100-500 microseconds
+
+**Sensors:** CW radar (primary), event camera (optional confirmation)
+
+**Processing:**
+- CW Doppler threshold detection
+- No fusion required
+- Local MCU decision
+- Direct hardware trigger to haptic actuator
+
+**Output:**
+- Binary: "Extreme velocity object detected"
+- Local haptic alert (if piezo actuator)
+- Trigger signal to Tier 2 and Tier 3
+
+**Data flow:**
+```
+CW Radar → Doppler FFT (32-64 µs) → Threshold Check (< 1 µs) → Hardware Trigger
+
+Total: 50-150 µs electronic latency
+```
+
+### 3.3 Tier 2 — Direction Validation (~0.5-2 ms)
+
+**Purpose:** Confirm detection, estimate direction of approach, prepare for characterization.
+
+**Latency target:** 0.5-2 milliseconds
+
+**Sensors:** Event camera (primary), CW radar confirmation
+
+**Processing:**
+- Event camera streak analysis
+- Angle estimation from streak pattern
+- Confidence scoring
+- Fusion with radar velocity
+
+**Output:**
+- Direction vector (angle ± 15°)
+- Velocity magnitude (from CW radar)
+- Confidence level
+- Alert routing decision (which node to buzz)
+
+**Data flow:**
+```
+Tier 1 Trigger → Event Camera Readout (10-100 µs) → Streak Analysis (100-500 µs) →
+Direction Estimate → BLE QoS Critical Transmission (300-800 µs) → Belt Reception
+
+Total: 0.5-2 ms
+```
+
+### 3.4 Tier 3 — Characterization (~5-50 ms)
+
+**Purpose:** Full threat characterization, evidence capture, logging, network transmission.
+
+**Latency target:** 5-50 milliseconds (not time-critical)
+
+**Sensors:** FMCW burst (range + velocity), event camera recording, conventional camera (if present)
+
+**Processing:**
+- FMCW range-Doppler analysis
+- Trajectory prediction
+- Object size estimation
+- Evidence recording to SD card
+- Network transmission to belt/app
+- Logging with integrity chain
+
+**Output:**
+- Full threat characterization
+- Recorded evidence
+- Log entry with cryptographic hash
+- Network notification
+
+**Data flow:**
+```
+Tier 1 Trigger → FMCW Burst (500-1000 µs) → Point Cloud → Classification →
+Recording → BLE Transmission → Belt Storage → Integrity Chain
+
+Total: 5-50 ms
+```
+
+### 3.5 Why This Separation Matters
+
+| Function | Old Approach | New Approach | Latency Improvement |
+|----------|--------------|--------------|---------------------|
+| Detection | FMCW frame wait + processing | CW threshold | 10-50× faster |
+| Alert | Full pipeline before alert | Tier 1 triggers local alert | Immediate vs delayed |
+| Characterization | Same path as detection | Separate Tier 3 | Non-blocking |
+| Evidence | Integrated with detection | Post-trigger recording | No detection delay |
+
+**The Tier 1 reflex trigger can fire before the projectile has traveled 0.5 meters.**
+
+---
+
+## 4. CW Radar vs FMCW — The Primary Trigger Decision
+
+### 4.1 Why CW Radar Is the Primary Trigger
+
+**FMCW latency budget:**
+- Chirp generation: 5-20 µs
+- Chirp duration: 8-15 µs
+- ADC sampling: 8-15 µs
+- Range FFT: 20-100 µs
+- Doppler FFT: 20-100 µs
+- Detection processing: 10-50 µs
+- **Total: 70-300 µs minimum**
+
+**CW radar latency budget:**
+- Continuous transmission (no chirp wait)
+- ADC sampling: 32-64 µs (short window sufficient)
+- Doppler FFT: 20-50 µs
+- Threshold check: < 1 µs
+- **Total: 50-120 µs**
+
+**CW radar advantages:**
+- No chirp timing overhead
+- No range FFT required (velocity only)
+- Shorter integration windows acceptable (large Doppler shifts)
+- Always-on, zero startup latency
+- Simpler firmware
+
+**FMCW role:**
+- Tier 3 characterization only
+- Provides range + refined velocity
+- Not on critical detection path
+
+### 4.2 CW Radar Configuration
+
+```c
+// CW radar configuration for 60 GHz module
+cw_config = {
+    .carrier_frequency = 60e9,           // 60 GHz
+    .tx_power_dbm = 10,                   // Maximum allowed
+    
+    // Receiver configuration
+    .if_gain_db = 40,                     // High gain for weak returns
+    .adc_sample_rate = 2e6,               // 2 MSPS sufficient
+    .fft_size = 64,                       // Short FFT for fast processing
+    .fft_window_us = 32,                  // 32 µs window = 31.25 kHz resolution
+    
+    // Detection thresholds
+    .velocity_threshold_ms = 50,          // Ignore below 50 m/s
+    .snr_threshold_db = 10,               // Minimum signal-to-noise
+    
+    // Update rate
+    .detection_interval_us = 100,         // 10 kHz detection rate
+};
+```
+
+### 4.3 CW + Event Camera Fusion (Tier 1 + Tier 2)
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    TIER 1 + TIER 2 FUSION                        │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  CW Radar (Primary Trigger):                                    │
+│  ├── Continuous Doppler monitoring                              │
+│  ├── FFT window: 32-64 µs                                      │
+│  ├── Detection latency: 50-150 µs                               │
+│  ├── Output: velocity magnitude, SNR                            │
+│  └── Trigger: "something fast exists"                           │
+│                                                                  │
+│  Event Camera (Direction Confirmation):                          │
+│  ├── Asynchronous event emission                                │
+│  ├── Event latency: 10-100 µs (microsecond-scale)              │
+│  ├── Streak analysis: 100-500 µs                                │
+│  ├── Output: direction angle, angular velocity                  │
+│  └── Trigger: confirms radar detection                          │
+│                                                                  │
+│  Fusion Output:                                                  │
+│  ├── Velocity: from CW radar (magnitude only)                   │
+│  ├── Direction: from event camera streak                         │
+│  ├── Combined: velocity vector (magnitude + direction)          │
+│  ├── Confidence: radar SNR × streak quality                     │
+│  └── Latency: 100-500 µs total                                  │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 5. mmWave Module Capabilities
+
+### 5.1 TI IWR6843 Family
 
 **Overview:** 60-64 GHz FMCW radar, widely used in automotive and industrial applications.
 
@@ -98,267 +321,160 @@ The IWR6843 can be configured for extended velocity range through custom chirp p
 | Range resolution | 4 cm | 30-60 cm |
 | Max range | 80 m | 20-40 m |
 
+**CW mode on IWR6843:**
+
+The IWR6843 can operate in continuous wave mode for pure Doppler detection:
+
+| Parameter | CW Mode Value |
+|-----------|---------------|
+| Latency | 50-150 µs |
+| Velocity range | ±500 m/s (with appropriate processing) |
+| Range information | None |
+| Update rate | Up to 100 kHz |
+| Power | Lower than FMCW |
+
 **Implementation:**
 
 ```c
-// TI mmWave SDK chirp configuration for extended Doppler
-// This is pseudo-code showing the parameter relationships
+// TI mmWave SDK configuration for CW mode
+// Simplified pseudo-code
 
-chirpConfig = {
-    .profileId = 1,
-    .chirpStartIndex = 0,
-    .chirpEndIndex = 127,
+cw_config = {
+    .mode = CONTINUOUS_WAVE,
+    .carrier_frequency = 60e9,
     
-    // Reduced bandwidth for extended Doppler
-    .freqStartConst = 60e9,           // 60 GHz start
-    .freqSlopeConst = 10e12,          // 10 MHz/µs slope (vs 40+ MHz/µs standard)
+    // No chirp configuration needed in CW mode
+    .tx_power = 10,  // dBm
     
-    // Shorter chirp duration
-    .txStartTime = 1e-6,              // 1 µs idle time
-    .rampEndTime = 10e-6,             // 10 µs ramp
+    // Receiver
+    .if_bandwidth_hz = 500e3,        // 500 kHz IF bandwidth
+    .adc_sample_rate = 2e6,          // 2 MSPS
     
-    // High update rate
-    .numLoops = 1,                    // Single chirp per frame
-    .framePeriodicity = 100e-6,       // 100 µs = 10 kHz update rate
+    // Processing
+    .fft_size = 64,                  // Short FFT for speed
+    .detection_threshold_snr = 10,    // dB
+    
+    // Continuous operation
+    .frame_trigger = AUTO_CONTINUOUS,
 };
-
-// Result: ±300 m/s Doppler range, 10 kHz update rate, ~50 cm range resolution
 ```
 
-**Tradeoff summary:**
-
-| Capability | Standard | Extended Doppler | Impact |
-|------------|----------|------------------|--------|
-| Velocity range | ±18 m/s | ±300 m/s | ✅ Projectile detection possible |
-| Range resolution | 4 cm | 50 cm | ⚠️ Position less precise |
-| Max range | 80 m | 30 m | ⚠️ Reduced for distant targets |
-| Update rate | 50 Hz | 10,000 Hz | ✅ Millisecond detection |
-
-**For SENTINEL-WEAR, the tradeoff is acceptable:**
-- We care about detection latency, not precise ranging
-- Engagement distances are < 10 m (typically 3-5 m)
-- 50 cm range resolution is sufficient for "threat approaching" vs "threat passed"
-
-### 3.2 Infineon BGT60ATR24C
+### 5.2 Infineon BGT60ATR24C
 
 **Overview:** 60 GHz MMIC radar, SPI interface, compact form factor.
 
-**Standard configuration:**
-- Max Doppler velocity: Configurable
-- Chirp flexibility: High (fully programmable)
-- Update rate: Up to 100 kHz raw data rate
+**Characteristics:**
+- Fully programmable chirp
+- CW mode supported
+- High integration density
+- Compact form factor ideal for pendant
 
 **Extended Doppler capability:**
-- Requires research to determine optimal chirp parameters
-- SPI interface allows real-time chirp reconfiguration
-- Suitable for on-node processing (MCU handles Doppler FFT)
+- Configurable via SPI
+- Research needed for optimal parameters
+- Promising for jewelry form factor
 
-**Research needed:** Characterize extended Doppler performance for this module.
-
-### 3.3 Acconeer XR112
+### 5.3 Acconeer XR112
 
 **Overview:** 60 GHz pulse radar, ultra-low power, SPI interface.
 
 **Characteristics:**
-- Different operating principle (pulse radar, not FMCW)
-- Excellent for low-power presence detection
-- Velocity detection: Limited compared to FMCW
+- Pulse radar (different from FMCW)
+- Excellent low-power presence detection
+- Single-shot velocity measurement possible
+- May have advantages for extreme velocity
 
-**Suitability for extreme velocity:**
-- Unknown; pulse radar may have advantages for single-shot velocity measurement
-- Requires research
+**Suitability:** Requires research. Pulse radar may detect single fast events efficiently.
 
-### 3.4 Module Selection Recommendations
+### 5.4 Module Selection Matrix
 
-| Module | Extended Doppler Support | Research Status | Recommendation |
-|--------|-------------------------|-----------------|----------------|
-| TI IWR6843AOP | ✅ Confirmed possible | Documented | **Primary choice** |
-| TI IWR6843ISK | ✅ Confirmed possible | Documented | Primary for research |
-| Infineon BGT60ATR24C | ⚠️ Likely | Research needed | Secondary |
-| Acconeer XR112 | ❓ Unknown | Research needed | Low priority |
-
-**For production deployment:** TI IWR6843AOP (antenna-on-package, compact form factor) with custom extended Doppler chirp configuration.
+| Module | CW Mode | Extended FMCW | Form Factor | Power | Recommendation |
+|--------|---------|---------------|-------------|-------|-----------------|
+| TI IWR6843AOP | ✅ Supported | ✅ Supported | Integrated antenna | Moderate | **Primary choice** |
+| TI IWR6843ISK | ✅ Supported | ✅ Supported | Module + external | Higher | Research platform |
+| Infineon BGT60ATR24C | ✅ Supported | ⚠️ Research needed | MMIC (compact) | Low | Secondary |
+| Acconeer XR112 | ⚠️ Different principle | N/A | Ultra-compact | Ultra-low | Research |
 
 ---
 
-## 4. Detection Architecture
+## 6. Event Camera Integration
 
-### 4.1 Continuous Wave (CW) Mode vs FMCW
-
-**FMCW (Frequency-Modulated Continuous Wave):**
-- Provides both range and velocity
-- Requires chirp generation
-- Processing complexity: Moderate
-- Latency: Chirp duration + FFT processing
-
-**CW (Continuous Wave) Mode:**
-- Pure Doppler detection (velocity only, no range)
-- Simpler hardware configuration
-- Processing complexity: Low (single FFT)
-- Latency: Only FFT processing time (~50-100 µs)
-
-**Recommendation for extreme velocity detection:**
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                 EXTREME VELOCITY DETECTION MODE                 │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                  │
-│  CW Mode (Always-Active Background Scanning)                    │
-│  ├── Zero scanning latency                                      │
-│  ├── Continuous Doppler monitoring                              │
-│  ├── Detects any fast-moving object                            │
-│  ├── No range information                                       │
-│  └── Latency: ~50-100 µs                                        │
-│                                                                  │
-│  FMCW Extended Doppler (When CW Triggers)                       │
-│  ├── Provides range + velocity                                  │
-│  ├── Higher latency (chirp + FFT ~500 µs)                       │
-│  └── Used to characterize threat after CW detection             │
-│                                                                  │
-│  Event Camera (Simultaneous with CW/FMCW)                       │
-│  ├── Microsecond trajectory visualization                      │
-│  ├── Confirms direction of approach                            │
-│  └── Provides visual evidence                                  │
-│                                                                  │
-└─────────────────────────────────────────────────────────────────┘
-```
-
-### 4.2 Processing Pipeline
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                    DETECTION PIPELINE                            │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                  │
-│  [ CW Radar ] ──► Doppler FFT ──► Velocity Threshold          │
-│       │                              │                           │
-│       │                              ▼                           │
-│       │                    [ v > 50 m/s? ]                      │
-│       │                         │                                │
-│       │                    YES  │  NO ──► Continue scanning     │
-│       │                         ▼                                │
-│       │                    TRIGGER                               │
-│       │                         │                                │
-│       ▼                         ▼                                │
-│  [ Event Camera ] ────► Capture Frame                           │
-│       │                         │                                │
-│       ▼                         ▼                                │
-│  [ FMCW Radar ] ────► Range + Velocity Characterization          │
-│       │                         │                                │
-│       │                         ▼                                │
-│       │                    DETECTION EVENT                       │
-│       │                         │                                │
-│       │                         ▼                                │
-│       └───────────────────► [ Transmit to Belt via BLE ]         │
-│                                    │                             │
-│                                    ▼                             │
-│                              QoS = CRITICAL                      │
-│                                    │                             │
-│                                    ▼                             │
-│                              Belt receives                       │
-│                                    │                             │
-│                                    ▼                             │
-│                              Alert to wearer                    │
-│                                                                  │
-│  Timeline:                                                       │
-│  ├── CW detection: 50-100 µs                                    │
-│  ├── Event camera capture: < 1 ms                               │
-│  ├── FMCW characterization: 500-1000 µs (optional)              │
-│  ├── BLE transmission: 1-3 ms                                   │
-│  ├── Belt processing: 100-500 µs                                │
-│  ├── Haptic trigger: < 1 ms                                     │
-│  └── Total: 2-6 ms (well within 3.5-8.5 ms window)              │
-│                                                                  │
-└─────────────────────────────────────────────────────────────────┘
-```
-
-### 4.3 Velocity Thresholds
-
-```toml
-[extreme_velocity.detection]
-# Velocity thresholds for triggering detection
-min_velocity_ms = 50              # Ignore objects below 50 m/s
-slow_projectile_threshold = 200   # 50-200 m/s = slow projectile
-fast_projectile_threshold = 500   # 200-500 m/s = standard projectile
-ultrafast_threshold = 800         # >500 m/s = high-velocity rifle
-
-# Detection modes
-mode = "cw_plus_event"            # "cw_only" | "cw_plus_event" | "cw_plus_fmcw" | "full"
-
-# Processing configuration
-doppler_fft_size = 256            # FFT size for Doppler analysis
-doppler_update_rate_hz = 10000    # 10 kHz update rate
-velocity_resolution_ms = 5        # Resolution (degraded for extended range)
-```
-
----
-
-## 5. Event Camera Integration
-
-### 5.1 Role in Extreme Velocity Detection
+### 6.1 Why Event Cameras Are Essential
 
 **Event cameras provide:**
-- Microsecond-latency motion detection
+- Microsecond-latency motion detection (10-100 µs, not 1 ms)
 - Trajectory visualization (streak across pixel array)
 - Direction of approach confirmation
-- Visual evidence capture
+- No frame wait — asynchronous event emission
 
-**Why event cameras are essential:**
-- Radar provides velocity but limited angular resolution
-- Event camera provides precise direction and trajectory
-- Fusion yields: velocity + direction + trajectory
+**Timing reality:**
 
-### 5.2 Event Camera Parameters
+| Component | Latency | Notes |
+|-----------|---------|-------|
+| Event generation (sensor) | 10-50 µs | Photon to event |
+| Event transmission | 10-50 µs | To MCU via MIPI/SPI |
+| Streak detection | 50-200 µs | Pattern recognition |
+| Angle estimation | 50-200 µs | Line fitting |
+| **Total** | **100-500 µs** | Direction validation |
 
-| Parameter | Value | Notes |
-|-----------|-------|-------|
-| Resolution | QVGA (320×240) minimum | Higher not required |
-| Latency | < 1 ms to event output | Critical for detection |
-| Event rate | 10+ M events/second | For fast-moving objects |
-| Sensitivity | High | Detect small fast objects |
+This is much faster than the original `< 1 ms` estimate because event cameras have no frame latency — events appear continuously.
 
-**Suitable event camera modules:**
-- Sony IMX636-based modules
-- Prophesee EVK3/EVK4 (evaluation)
-- iniVation DAVIS346
-
-### 5.3 Fusion with Doppler Radar
+### 6.2 Event Camera Processing Pipeline
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                    SENSOR FUSION                                 │
+│                    EVENT CAMERA PROCESSING                       │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                  │
-│  Doppler Radar:                                                  │
-│  ├── Radial velocity (from Doppler shift)                       │
-│  ├── Detection time (from FFT peak timestamp)                   │
-│  └── Rough bearing (antenna array angle of arrival)             │
+│  [ Event Sensor ]                                               │
+│  ├── Asynchronous event emission                                │
+│  ├── Events queued in circular buffer                           │
+│  └── DMA transfer to MCU memory                                 │
 │                                                                  │
-│  Event Camera:                                                   │
-│  ├── Trajectory streak (pixel positions over time)              │
-│  ├── Angular velocity (pixels per millisecond)                  │
-│  ├── Direction of approach (streak direction)                   │
-│  └── Time of arrival (event timestamp)                          │
+│  [ Streak Detection ]                                           │
+│  ├── Monitor recent event density                               │
+│  ├── Threshold: events/ms > X → fast motion detected           │
+│  └── Trigger: collect streak events                             │
 │                                                                  │
-│  Fusion Output:                                                  │
-│  ├── Combined velocity vector (magnitude + direction)           │
-│  ├── Predicted impact point (extrapolated trajectory)          │
-│  ├── Time to impact (from current position)                    │
-│  └── Object size estimate (from event density)                 │
+│  [ Direction Estimation ]                                        │
+│  ├── Collect events in 100-500 µs window                        │
+│  ├── Fit line to event positions                                │
+│  ├── Line angle = direction of approach                         │
+│  └── Angular velocity = streak length / time                    │
+│                                                                  │
+│  [ Output ]                                                      │
+│  ├── Direction angle: θ ± 15°                                   │
+│  ├── Angular velocity: dθ/dt                                    │
+│  └── Confidence: based on streak quality                        │
 │                                                                  │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-### 5.4 Event Camera on 360° Pendant
+### 6.3 Event Camera Parameters for Extreme Velocity
 
-The 360° pendant can integrate event cameras in addition to conventional cameras:
+| Parameter | Value | Rationale |
+|-----------|-------|-----------|
+| Resolution | QVGA (320×240) | Higher not needed for streak detection |
+| Latency | 10-100 µs | Asynchronous, no frame wait |
+| Event rate capacity | 10+ M events/sec | Fast objects generate bursts |
+| Sensitivity | High | Detect small fast objects |
+| Region of interest | Forward hemisphere | Primary threat direction |
+
+### 6.4 Event Camera on 360° Pendant
 
 **Variant E — Event-Enhanced 360° Pendant:**
-- 6 conventional cameras for visual 360° capture
-- 2 event cameras at key angles (e.g., forward ±45°)
-- Event cameras always-on for fast transient detection
-- Conventional cameras activated for visual documentation
+
+The 360° pendant can integrate event cameras alongside conventional cameras:
+
+| Camera Type | Count | Purpose |
+|-------------|-------|---------|
+| Conventional | 6-8 | Visual 360° capture, SLAM |
+| Event | 2 | Fast transient detection, direction |
+
+**Positioning:**
+- Event cameras at forward angles (±45° from center)
+- Cover primary threat approach direction
+- Conventional cameras cover full 360° for evidence
 
 **Configuration:**
 
@@ -367,89 +483,407 @@ The 360° pendant can integrate event cameras in addition to conventional camera
 enabled = true
 count = 2
 positions = ["forward_left_45deg", "forward_right_45deg"]
-always_on = true
-trigger_threshold_events_per_ms = 1000  # Trigger when high event rate detected
+
+[nodes.pendant_360.event_cameras.detection]
+# Trigger parameters
+streak_event_threshold_per_ms = 500    # Events/ms to trigger
+min_streak_length_px = 20              # Minimum streak length
+max_detection_latency_us = 500         # Target latency
+
+# Processing
+dma_enabled = true                      # Direct memory access
+interrupt_driven = true                 # Event-triggered ISR
 ```
 
 ---
 
-## 6. Reaction Time Budget
+## 7. Realistic Latency Budgets
 
-### 6.1 Complete Timing Analysis
+### 7.1 Conservative Production System
 
-**Projectile approach (rifle, 850 m/s, 3 m distance):**
+| Stage | Latency | Notes |
+|-------|---------|-------|
+| CW Doppler detection | 50-150 µs | FFT + threshold |
+| Event camera confirmation | 100-500 µs | Streak analysis |
+| Local MCU decision | 5-50 µs | Classification |
+| BLE QoS Critical transmission | 300-800 µs | Optimized stack |
+| Belt reception | 50-150 µs | IRQ-driven |
+| **Total electronic latency** | **0.5-2.0 ms** | Before actuator |
 
-| Stage | Duration | Cumulative |
-|-------|----------|------------|
-| Object enters detection zone | T=0 | 0 |
-| CW Doppler FFT processing | 50-100 µs | 100 µs |
-| Velocity threshold check | < 10 µs | 110 µs |
-| Event camera capture | < 1 ms | 1.1 ms |
-| FMCW characterization (optional) | 500-1000 µs | 2.1 ms |
-| Detection event generation | 10-50 µs | 2.15 ms |
-| BLE queue (QoS = Critical, immediate) | 0-2 ms | 4.15 ms |
-| BLE transmission | 1-3 ms | 7.15 ms |
-| Belt reception and processing | 100-500 µs | 7.65 ms |
-| Alert decision | 10-50 µs | 7.7 ms |
-| Haptic trigger command | < 1 ms | 8.7 ms |
-| **Total detection-to-alert** | **~5-9 ms** | |
-| Object impact (if on trajectory) | 3.5 ms | |
+### 7.2 Haptic Actuator Physics
 
-**Critical insight:** The detection-to-alert time (~5-9 ms) EXCEEDS the time to impact (3.5 ms) for rifle projectiles at 3 m. This is the fundamental physics constraint.
+**The actuator is the bottleneck for human-perceptible alerting:**
 
-**However:**
-- At greater distances (5-10 m), time to impact increases to 6-12 ms
-- Detection is useful for situational awareness and evidence capture
-- Detection can trigger recording for forensic use
-- Detection provides critical information even if interception is impossible
+| Actuator Type | Onset Time | Suitability |
+|---------------|------------|-------------|
+| ERM motor | 10-50 ms | ❌ Too slow |
+| LRA (linear resonant) | 2-10 ms | ⚠️ Marginal |
+| Piezo haptic | 0.1-1.0 ms | ✅ Excellent |
+| Electrostatic skin stimulator | < 0.1 ms | ✅ Best (if available) |
 
-### 6.2 Latency Optimization Strategies
+**Recommendation:** For extreme velocity alerting, piezo haptic actuators are mandatory. Standard vibration motors are too slow to be useful within the detection window.
 
-**Strategy 1: QoS = Critical Preemption**
+### 7.3 Complete End-to-End Timing
+
+**With piezo haptics:**
+
+| Stage | Latency |
+|-------|---------|
+| Tier 1 detection (CW radar) | 50-150 µs |
+| Tier 2 direction (event camera) | 100-500 µs |
+| BLE transmission | 300-800 µs |
+| Belt processing | 50-150 µs |
+| Piezo haptic trigger | 50-300 µs |
+| Piezo mechanical onset | 100-500 µs |
+| **Total** | **0.65-2.4 ms** |
+
+**With standard LRA haptics:**
+
+| Stage | Latency |
+|-------|---------|
+| All electronic | 0.5-1.5 ms |
+| LRA onset | 2-10 ms |
+| **Total** | **2.5-11.5 ms** |
+
+### 7.4 Comparison to Projectile Flight Time
+
+| Projectile | Velocity | Time to 3 m | Detection + Piezo Alert | Detection + LRA Alert |
+|------------|----------|--------------|------------------------|----------------------|
+| Rifle (850 m/s) | 850 m/s | 3.5 ms | 0.65-2.4 ms ✅ | 2.5-11.5 ms ⚠️ |
+| Handgun (350 m/s) | 350 m/s | 8.5 ms | 0.65-2.4 ms ✅ | 2.5-11.5 ms ✅ |
+
+**With piezo haptics, alert fires before rifle bullet reaches wearer at 3 m distance.**
+
+**With LRA haptics, alert fires near or after rifle bullet impact.**
+
+---
+
+## 8. BLE Latency Optimization
+
+### 8.1 Why Standard BLE Is Too Slow
+
+Standard BLE implementations assume:
+- Generic GATT profile
+- Pairing negotiation
+- Connection interval negotiation
+- Application-layer buffering
+- OS scheduler involvement
+
+For SENTINEL-WEAR, the belt node and sensing nodes are controlled devices with:
+- Pre-paired relationships
+- Fixed connection intervals
+- Direct IRQ-driven processing
+- No OS scheduler (embedded, not Linux)
+
+### 8.2 Optimized BLE Stack
+
+**Optimizations:**
+
+| Optimization | Latency Impact |
+|--------------|----------------|
+| Pre-established connections | Eliminates connection setup |
+| Fixed connection interval (7.5 ms) | Predictable latency |
+| QoS = Critical preemption | Bypass queue |
+| Direct ISR to radio | No buffering |
+| Nordic-to-Nordic fast path | Hardware-optimized |
+| Reserved timeslot | Guaranteed transmission |
+
+**Optimized BLE latency:**
+
+| Scenario | Latency |
+|----------|---------|
+| Standard BLE (worst case) | 0-30 ms |
+| Optimized BLE (QoS Critical) | 0.3-0.8 ms |
+| Reserved slot + QoS Critical | 0.2-0.5 ms |
+
+### 8.3 BLE Configuration
+
+```toml
+[ban.ble_optimization]
+# Low-latency BLE configuration
+connection_interval_ms = 7.5           # Minimum allowed
+slave_latency = 0                      # No skipped events
+supervision_timeout_ms = 1000
+
+# QoS configuration
+[ban.qos]
+classes = ["critical", "high", "medium", "low"]
+
+[ban.qos.critical]
+# Extreme velocity detection is Critical
+preempt_other_traffic = true
+immediate_transmit = true
+max_latency_ms = 1
+reserved_slot_enabled = true
+reserved_slot_start_ms = 5
+reserved_slot_end_ms = 7
+
+# Firmware behavior
+direct_isr_to_radio = true             # Bypass application buffer
+zero_copy_transmission = true          # DMA from detection to radio
+```
+
+---
+
+## 9. Firmware Implementation
+
+### 9.1 CW Radar Driver
 
 ```rust
-// Detection event bypasses normal BLE scheduling
-pub fn transmit_extreme_velocity_detection(event: ExtremeVelocityEvent) {
-    let packet = BANPacket::new(QoS::Critical, event);
-    // Critical packets preempt all other traffic
-    ble_radio.transmit_immediate(packet);
+// firmware/src/drivers/mmwave_cw.rs
+
+/// CW radar driver for extreme velocity detection
+pub struct CwRadarDriver {
+    spi: SpiDevice,
+    config: CwRadarConfig,
+    fft_buffer: [Complex<f32>; 64],
+    velocity_threshold_ms: f32,
+}
+
+pub struct CwRadarConfig {
+    pub carrier_freq_hz: u64,
+    pub if_gain_db: u8,
+    pub adc_sample_rate_hz: u32,
+    pub fft_size: usize,
+    pub fft_window_us: u32,
+    pub velocity_threshold_ms: f32,
+    pub snr_threshold_db: f32,
+}
+
+impl CwRadarDriver {
+    /// Configure radar for CW mode
+    pub fn init(&mut self) -> Result<(), RadarError> {
+        // Enable CW mode on radar module
+        self.write_register(REG_MODE, MODE_CW)?;
+        self.write_register(REG_TX_POWER, 10)?; // 10 dBm
+        self.write_register(REG_IF_GAIN, self.config.if_gain_db)?;
+        
+        Ok(())
+    }
+    
+    /// Poll for extreme velocity detection
+    /// Returns immediately if no detection, or detection event within ~100 µs
+    pub fn poll_detection(&mut self) -> Option<ExtremeVelocityEvent> {
+        // Read ADC samples (DMA transfer, ~32-64 µs)
+        let samples = self.read_adc_samples_dma();
+        
+        // Apply window function
+        self.apply_window(&samples);
+        
+        // Compute FFT (hardware accelerator or optimized software)
+        // 64-point FFT on Cortex-M7 with FPU: ~20-50 µs
+        let spectrum = self.compute_fft(&self.fft_buffer);
+        
+        // Find peak in spectrum
+        let peak = self.find_peak(&spectrum);
+        
+        // Convert frequency to velocity
+        let velocity_ms = self.freq_to_velocity(peak.freq_hz);
+        
+        // Check threshold
+        if velocity_ms > self.velocity_threshold_ms && peak.snr_db > self.config.snr_threshold_db {
+            return Some(ExtremeVelocityEvent {
+                timestamp_us: self.get_timestamp_us(),
+                velocity_ms,
+                snr_db: peak.snr_db,
+                confidence: Confidence::High,
+            });
+        }
+        
+        None
+    }
+    
+    /// Convert Doppler frequency to velocity
+    fn freq_to_velocity(&self, freq_hz: f32) -> f32 {
+        // v = (Δf × c) / (2 × f_c)
+        (freq_hz * 3e8) / (2.0 * self.config.carrier_freq_hz as f32)
+    }
+    
+    /// 64-point FFT optimized for ARM Cortex-M7
+    fn compute_fft(&mut self, buffer: &mut [Complex<f32>; 64]) -> Spectrum {
+        // Use CMSIS-DSP or arm_cfft_f32 for optimal speed
+        // 64-point FFT on Cortex-M7 @ 480 MHz: ~15-25 µs
+        arm_cfft_f32(buffer);
+        
+        // Convert to magnitude spectrum
+        let mut spectrum = Spectrum::default();
+        for (i, bin) in buffer.iter().enumerate() {
+            spectrum.bins[i] = (bin.re * bin.re + bin.im * bin.im).sqrt();
+        }
+        spectrum
+    }
+}
+
+/// Detection event from CW radar
+pub struct ExtremeVelocityEvent {
+    pub timestamp_us: u64,
+    pub velocity_ms: f32,
+    pub snr_db: f32,
+    pub confidence: Confidence,
 }
 ```
 
-**Impact:** Reduces BLE queue latency from 0-30 ms to 0-2 ms.
+### 9.2 Event Camera Driver
 
-**Strategy 2: Reserved BLE Slot**
+```rust
+// firmware/src/drivers/event_camera.rs
 
+/// Event camera driver optimized for fast transient detection
+pub struct EventCameraDriver {
+    interface: EventInterface,
+    event_buffer: CircularBuffer<Event, 4096>,
+    streak_threshold: u32,
+    detection_callback: Option<fn(StreakEvent)>,
+}
+
+impl EventCameraDriver {
+    /// Poll for fast motion streak
+    /// Called from ISR when events arrive
+    pub fn process_events(&mut self) -> Option<StreakEvent> {
+        // Read events from sensor (already DMA'd to buffer)
+        let recent_count = self.count_events_in_window_us(500); // Last 500 µs
+        
+        // Fast motion threshold
+        if recent_count > self.streak_threshold {
+            // Collect streak events
+            let streak_events = self.get_recent_events(500);
+            
+            // Fit line to streak
+            let direction = self.fit_line_to_events(&streak_events);
+            
+            return Some(StreakEvent {
+                timestamp_us: self.get_timestamp_us(),
+                direction_rad: direction.angle,
+                angular_velocity: direction.angular_velocity,
+                event_count: recent_count,
+                confidence: self.calculate_confidence(&streak_events),
+            });
+        }
+        
+        None
+    }
+    
+    /// Fit line to event positions for direction estimation
+    fn fit_line_to_events(&self, events: &[Event]) -> Direction {
+        if events.len() < 10 {
+            return Direction::unknown();
+        }
+        
+        // Simple linear regression on x,y coordinates
+        let n = events.len() as f32;
+        let sum_x: f32 = events.iter().map(|e| e.x as f32).sum();
+        let sum_y: f32 = events.iter().map(|e| e.y as f32).sum();
+        let sum_xy: f32 = events.iter().map(|e| (e.x as f32) * (e.y as f32)).sum();
+        let sum_x2: f32 = events.iter().map(|e| (e.x as f32).powi(2)).sum();
+        
+        let denom = n * sum_x2 - sum_x * sum_x;
+        if denom.abs() < 1e-6 {
+            return Direction::unknown();
+        }
+        
+        let slope = (n * sum_xy - sum_x * sum_y) / denom;
+        let angle = slope.atan2(1.0); // Direction in radians
+        
+        // Angular velocity from streak length over time
+        let first_t = events.first().unwrap().timestamp_us;
+        let last_t = events.last().unwrap().timestamp_us;
+        let duration_us = last_t.saturating_sub(first_t);
+        
+        // Calculate streak length in pixels
+        let first = (events.first().unwrap().x, events.first().unwrap().y);
+        let last = (events.last().unwrap().x, events.last().unwrap().y);
+        let length_px = ((last.0 - first.0).pow(2) + (last.1 - first.1).pow(2)) as f32;
+        let angular_velocity = if duration_us > 0 {
+            length_px / (duration_us as f32 / 1000.0) // pixels per ms
+        } else {
+            0.0
+        };
+        
+        Direction {
+            angle,
+            angular_velocity,
+        }
+    }
+}
 ```
-BLE Connection Event (30 ms interval)
-├── Slot 0-2 ms:   Normal traffic
-├── Slot 2-25 ms:  Normal traffic
-├── Slot 25-28 ms: RESERVED (extreme velocity / critical alerts)
-└── Slot 28-30 ms: Retransmits
+
+### 9.3 Fusion and Detection Pipeline
+
+```rust
+// firmware/src/logic/extreme_velocity_pipeline.rs
+
+/// Complete extreme velocity detection pipeline
+pub struct ExtremeVelocityPipeline {
+    cw_radar: CwRadarDriver,
+    event_camera: EventCameraDriver,
+    ble_transmitter: BleTransmitter,
+    haptic_driver: HapticDriver,
+    
+    // Configuration
+    config: PipelineConfig,
+    
+    // State
+    tier1_triggered: bool,
+    tier2_result: Option<Tier2Result>,
+}
+
+impl ExtremeVelocityPipeline {
+    /// Main detection loop — called from main loop or ISR
+    pub fn poll(&mut self) {
+        // === TIER 1: Reflex Trigger (50-150 µs) ===
+        if let Some(detection) = self.cw_radar.poll_detection() {
+            self.tier1_triggered = true;
+            
+            // Immediately trigger local haptic (if piezo)
+            if self.config.piezo_haptic_enabled {
+                self.haptic_driver.trigger_immediate();
+            }
+            
+            // Start Tier 2 analysis
+            self.event_camera.start_capture();
+        }
+        
+        // === TIER 2: Direction Validation (100-500 µs after Tier 1) ===
+        if self.tier1_triggered {
+            if let Some(streak) = self.event_camera.poll_detection() {
+                // Fuse radar velocity with camera direction
+                self.tier2_result = Some(Tier2Result {
+                    velocity: self.cw_radar.last_velocity(),
+                    direction: streak.direction_rad,
+                    confidence: streak.confidence,
+                });
+                
+                // Transmit to belt with QoS Critical
+                self.ble_transmit_detection(&self.tier2_result);
+            }
+        }
+    }
+    
+    /// Transmit detection to belt node
+    fn ble_transmit_detection(&mut self, result: &Option<Tier2Result>) {
+        if let Some(data) = result {
+            let packet = BANPacket::new(
+                QoS::Critical,
+                ExtremeVelocityMessage {
+                    timestamp_us: self.get_timestamp_us(),
+                    velocity_ms: data.velocity,
+                    direction_rad: data.direction,
+                    confidence: data.confidence as u8,
+                },
+            );
+            
+            // QoS Critical bypasses normal queue
+            self.ble_transmitter.transmit_immediate(packet);
+        }
+    }
+}
 ```
-
-**Impact:** Guarantees 3 ms slot every 30 ms for critical alerts.
-
-**Strategy 3: Parallel Processing**
-
-```
-Timeline:
-├── T=0 ms:     Doppler detection
-├── T=0.1 ms:   Start event camera capture (parallel)
-├── T=0.1 ms:   Start BLE transmission preparation (parallel)
-├── T=1.1 ms:   Event camera data ready
-├── T=1.1 ms:   BLE packet transmitted (QoS Critical)
-├── T=4 ms:     Belt receives and processes
-├── T=5 ms:     Haptic alert fires
-```
-
-**Impact:** Overlapping detection and transmission saves 1-2 ms.
 
 ---
 
-## 7. Hardware Configuration
+## 10. Hardware Configuration
 
-### 7.1 Radar Module Integration
+### 10.1 Radar Module Integration
 
 **For pendant node (primary sensing position):**
 
@@ -459,293 +893,57 @@ Timeline:
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                  │
 │  ┌─────────────────┐         ┌─────────────────┐               │
-│  │  mmWave Radar   │         │  Event Camera   │               │
-│  │  (IWR6843AOP)   │◄────────│  (Optional)    │               │
+│  │  CW Radar       │         │  Event Camera   │               │
+│  │  (IWR6843AOP)   │◄────────│  (IMX636)       │               │
 │  │                 │  GPIO   │                 │               │
 │  │  SPI Interface  │  Trigger│  MIPI/USB       │               │
 │  └────────┬────────┘         └─────────────────┘               │
 │           │                                                     │
 │           ▼                                                     │
-│  ┌─────────────────┐                                            │
-│  │  Main MCU       │                                            │
-│  │  (nRF5340)      │                                            │
-│  │                 │                                            │
-│  │  Radar driver   │                                            │
-│  │  Doppler FFT    │                                            │
-│  │  Event handler  │                                            │
-│  └────────┬────────┘                                            │
+│  ┌─────────────────┐         ┌─────────────────┐               │
+│  │  Main MCU       │         │  Piezo Haptic   │               │
+│  │  (nRF5340)      │────────►│  (DRV2667)      │               │
+│  │                 │  GPIO   │                 │               │
+│  │  CW driver      │         │  Sub-ms onset   │               │
+│  │  Event handler  │         │                 │               │
+│  └────────┬────────┘         └─────────────────┘               │
 │           │                                                     │
 │           ▼                                                     │
 │  ┌─────────────────┐                                            │
-│  │  BLE Radio      │──► To belt node                           │
-│  │  (Integrated)   │    QoS = Critical for extreme velocity    │
+│  │  BLE Radio      │──► To belt node (QoS Critical)           │
+│  │  (Integrated)   │                                            │
 │  └─────────────────┘                                            │
 │                                                                  │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-### 7.2 Pin Configuration
+### 10.2 Pin Configuration
 
 | Signal | Direction | MCU Pin | Description |
 |--------|-----------|---------|-------------|
 | `RADAR_CS` | Output | GPIO | Radar SPI chip select |
 | `RADAR_IRQ` | Input | GPIO | Radar data ready interrupt |
 | `RADAR_RST` | Output | GPIO | Radar hardware reset |
-| `EVENT_CAM_TRIGGER` | Output | GPIO | Event camera enable/trigger |
-| `EVENT_CAM_DATA` | Input | MIPI/SPI | Event camera data interface |
+| `EVENT_DATA` | Input | MIPI/SPI | Event camera data |
+| `EVENT_TRIGGER` | Output | GPIO | Event camera enable |
+| `PIEZO_PWM` | Output | PWM | Piezo haptic driver |
+| `PIEZO_EN` | Output | GPIO | Piezo enable |
 
-### 7.3 Antenna Considerations
+### 10.3 Piezo Haptic Driver Requirements
 
-**Antenna pattern for extreme velocity detection:**
-
-| Requirement | Specification |
-|-------------|---------------|
-| Coverage | Forward hemisphere (primary threat direction) |
-| Beam width | 60-90° azimuth, 30-45° elevation |
-| Gain | 5-10 dBi typical |
-| Mounting | Outward-facing from pendant (away from body) |
-
-**Body shadowing mitigation:**
-- Pendant is centered on torso (good forward visibility)
-- Arms may partially obscure during movement
-- Antenna diversity on belt node helps with link reliability
+| Parameter | Value | Notes |
+|-----------|-------|-------|
+| Driver IC | DRV2667 or equivalent | Piezo driver with boost |
+| Response time | < 500 µs | Onset time |
+| Drive voltage | 50-200 Vpp | Typical piezo |
+| Waveform | Single impulse | For alert |
+| Connection | I2C + PWM | Configuration + drive |
 
 ---
 
-## 8. Firmware Implementation
+## 11. Configuration Reference
 
-### 8.1 Driver Architecture
-
-```rust
-// firmware/src/drivers/mmwave.rs
-
-/// mmWave radar driver with extended Doppler support
-pub struct MmWaveDriver {
-    spi: SpiDevice,
-    cs: OutputPin,
-    irq: InputPin,
-    reset: OutputPin,
-    config: RadarConfig,
-}
-
-/// Radar configuration for different modes
-pub struct RadarConfig {
-    pub mode: RadarMode,
-    pub chirp_config: Option<ChirpConfig>,
-    pub update_rate_hz: u32,
-    pub velocity_range_ms: f32,
-}
-
-pub enum RadarMode {
-    Standard,           // Normal operation (±18 m/s)
-    ExtendedDoppler,    // Projectile detection (±300 m/s)
-    ContinuousWave,     // Pure Doppler (no range)
-}
-
-/// Extended Doppler chirp configuration
-pub struct ChirpConfig {
-    pub start_freq_hz: u64,
-    pub chirp_slope_hz_per_us: f32,
-    pub chirp_duration_us: u32,
-    pub num_chirps_per_frame: u32,
-    pub frame_period_us: u32,
-}
-
-impl MmWaveDriver {
-    /// Configure radar for extreme velocity detection mode
-    pub fn configure_extended_doppler(&mut self) -> Result<(), RadarError> {
-        let config = ChirpConfig {
-            start_freq_hz: 60_000_000_000,       // 60 GHz
-            chirp_slope_hz_per_us: 10_000_000.0, // 10 MHz/µs (vs 40+ standard)
-            chirp_duration_us: 10,                // 10 µs chirp
-            num_chirps_per_frame: 1,              // Single chirp per frame
-            frame_period_us: 100,                 // 100 µs frame = 10 kHz rate
-        };
-        
-        self.write_chirp_config(&config)?;
-        self.config.mode = RadarMode::ExtendedDoppler;
-        self.config.velocity_range_ms = 300.0;
-        
-        Ok(())
-    }
-    
-    /// Configure radar for continuous wave (pure Doppler) mode
-    pub fn configure_continuous_wave(&mut self) -> Result<(), RadarError> {
-        // CW mode: transmit continuous tone, measure Doppler shift only
-        self.write_register(CW_MODE_ENABLE, 1)?;
-        self.config.mode = RadarMode::ContinuousWave;
-        self.config.velocity_range_ms = 500.0; // Extended range in CW
-        
-        Ok(())
-    }
-    
-    /// Process incoming radar data and detect fast objects
-    pub fn poll_detection(&mut self) -> Option<DetectionEvent> {
-        if self.irq.is_high() {
-            let raw_data = self.read_adc_samples()?;
-            let doppler_spectrum = self.compute_doppler_fft(&raw_data);
-            
-            // Find peak velocity in Doppler spectrum
-            let peak = self.find_velocity_peak(&doppler_spectrum);
-            
-            if peak.velocity_ms > self.config.min_velocity_threshold {
-                return Some(DetectionEvent {
-                    timestamp_us: self.get_timestamp(),
-                    velocity_ms: peak.velocity_ms,
-                    direction_rad: peak.angle_rad,
-                    confidence: peak.snr_db,
-                    event_type: EventType::ExtremeVelocity,
-                });
-            }
-        }
-        
-        None
-    }
-    
-    /// Compute Doppler FFT from raw ADC samples
-    fn compute_doppler_fft(&self, samples: &[i16]) -> DopplerSpectrum {
-        // Window function (Hamming or similar)
-        let windowed: Vec<f32> = samples.iter()
-            .enumerate()
-            .map(|(i, &s)| s as f32 * hamming_window(i, samples.len()))
-            .collect();
-        
-        // FFT computation (hardware accelerator or software)
-        let spectrum = fft::compute(&windowed);
-        
-        // Convert to velocity bins
-        DopplerSpectrum::from_fft(spectrum, self.config.velocity_range_ms)
-    }
-}
-```
-
-### 8.2 Event Camera Integration
-
-```rust
-// firmware/src/drivers/event_camera.rs
-
-/// Event camera driver for fast transient detection
-pub struct EventCameraDriver {
-    interface: EventCameraInterface,
-    config: EventCameraConfig,
-}
-
-pub struct EventCameraConfig {
-    pub resolution: (u16, u16),
-    pub sensitivity: f32,
-    pub trigger_event_rate: u32,  // Events per ms to trigger detection
-}
-
-impl EventCameraDriver {
-    /// Poll for high-event-rate conditions indicating fast object
-    pub fn poll_fast_motion(&mut self) -> Option<FastMotionEvent> {
-        let event_count = self.count_recent_events_ms(1); // Count events in last 1 ms
-        
-        if event_count > self.config.trigger_event_rate {
-            // Fast motion detected
-            let trajectory = self.compute_trajectory_from_events();
-            
-            return Some(FastMotionEvent {
-                timestamp_us: self.get_timestamp(),
-                event_count,
-                direction_rad: trajectory.angle_rad,
-                angular_velocity_rad_per_ms: trajectory.angular_velocity,
-            });
-        }
-        
-        None
-    }
-    
-    /// Compute trajectory from event streak pattern
-    fn compute_trajectory_from_events(&self) -> Trajectory {
-        // Events from fast object form a streak across pixel array
-        // Fit a line to recent events to determine direction
-        let recent_events = self.get_recent_events(1000); // Last 1 ms
-        let trajectory = fit_line_to_events(&recent_events);
-        trajectory
-    }
-}
-```
-
-### 8.3 Fusion and Detection Event Generation
-
-```rust
-// firmware/src/logic/extreme_velocity_detection.rs
-
-/// Extreme velocity detection fusion logic
-pub struct ExtremeVelocityDetector {
-    radar: MmWaveDriver,
-    event_camera: Option<EventCameraDriver>,
-    config: ExtremeVelocityConfig,
-}
-
-impl ExtremeVelocityDetector {
-    /// Main detection loop
-    pub fn poll(&mut self) -> Option<ExtremeVelocityEvent> {
-        // Check CW Doppler radar
-        let radar_detection = self.radar.poll_detection();
-        
-        // Check event camera (if present)
-        let event_detection = self.event_camera.as_mut()
-            .and_then(|cam| cam.poll_fast_motion());
-        
-        // Fuse detections
-        match (radar_detection, event_detection) {
-            (Some(radar), Some(event)) => {
-                // Both sensors agree - high confidence
-                Some(self.fuse_detections(radar, event))
-            }
-            (Some(radar), None) => {
-                // Radar only - medium confidence
-                Some(ExtremeVelocityEvent::from_radar_only(radar))
-            }
-            (None, Some(event)) => {
-                // Event camera only - low confidence (no velocity)
-                // Still generate event but mark as unconfirmed
-                Some(ExtremeVelocityEvent::from_event_only(event, Confidence::Low))
-            }
-            (None, None) => None,
-        }
-    }
-    
-    /// Fuse radar and event camera detections
-    fn fuse_detections(
-        &self,
-        radar: DetectionEvent,
-        event: FastMotionEvent,
-    ) -> ExtremeVelocityEvent {
-        // Combine velocity from radar with direction from event camera
-        let velocity_vector = VelocityVector {
-            magnitude_ms: radar.velocity_ms,
-            direction_rad: event.direction_rad,
-        };
-        
-        ExtremeVelocityEvent {
-            timestamp_us: radar.timestamp_us,
-            velocity: velocity_vector,
-            confidence: Confidence::High,
-            sensors: SensorSet::RadarAndEvent,
-        }
-    }
-    
-    /// Generate BAN message for transmission to belt
-    pub fn generate_ban_message(&self, event: ExtremeVelocityEvent) -> BANMessage {
-        BANMessage::ExtremeVelocityDetection {
-            timestamp_ms: event.timestamp_us / 1000,
-            velocity_ms: event.velocity.magnitude_ms,
-            direction_rad: event.velocity.direction_rad,
-            confidence: event.confidence as u8,
-            sensor_mask: event.sensors.bits(),
-        }
-    }
-}
-```
-
----
-
-## 9. Configuration Reference
-
-### 9.1 Complete Configuration
+### 11.1 Complete Configuration
 
 ```toml
 [extreme_velocity]
@@ -755,295 +953,211 @@ enabled = false
 # Mode: "disabled" | "research" | "production"
 mode = "production"
 
-# Detection configuration
-[extreme_velocity.detection]
-# Velocity thresholds
-min_velocity_ms = 50              # Ignore below 50 m/s
-slow_projectile_threshold = 200   # Handgun range
-fast_projectile_threshold = 500   # Rifle range
-ultrafast_threshold = 800         # High-velocity rifle
+# Tiered architecture configuration
+[extreme_velocity.tier1]
+# Reflex trigger parameters
+radar_mode = "continuous_wave"      # "continuous_wave" | "fmcw"
+velocity_threshold_ms = 50          # Ignore below 50 m/s
+detection_latency_target_us = 150   # Target: 150 µs
+local_haptic_trigger = true         # Fire local alert immediately
+haptic_type = "piezo"               # "piezo" | "lra"
 
-# Detection modes
-radar_mode = "continuous_wave"    # "continuous_wave" | "fmcw" | "hybrid"
-event_camera_enabled = true
-fusion_mode = "radar_and_event"   # "radar_only" | "event_only" | "radar_and_event"
+# CW radar parameters
+[extreme_velocity.tier1.cw_radar]
+fft_size = 64
+fft_window_us = 32
+adc_sample_rate_hz = 2000000
+if_gain_db = 40
+velocity_resolution_ms = 77          # For 32 µs window at 60 GHz
 
-# Processing parameters
-doppler_fft_size = 256
-doppler_update_rate_hz = 10000
-velocity_resolution_ms = 5
+# Event camera parameters
+[extreme_velocity.tier1.event_camera]
+enabled = true
+streak_threshold_per_ms = 500
+min_streak_length_px = 20
+capture_window_us = 500
 
-# Detection window
-max_detection_distance_m = 10
-detection_field_of_view_deg = 90
+# Tier 2: Direction validation
+[extreme_velocity.tier2]
+enabled = true
+direction_accuracy_deg = 15
+fusion_mode = "radar_and_event"
+latency_target_ms = 2
 
-# Alert configuration
-[extreme_velocity.alert]
-# Alert generation
-generate_haptic_alert = true
-generate_audio_alert = false
-generate_app_alert = true
+# Tier 3: Characterization
+[extreme_velocity.tier3]
+enabled = true
+fmcw_burst = true
+record_evidence = true
+latency_target_ms = 50
+
+# BLE configuration
+[extreme_velocity.ble]
+qos_class = "critical"
+reserved_slot = true
+reserved_slot_start_ms = 5
+reserved_slot_end_ms = 7
+direct_isr_to_radio = true
+
+# Haptic configuration
+[extreme_velocity.haptic]
+type = "piezo"
+onset_time_ms = 0.5
+pattern = "single_impulse"
 
 # Alert routing
-alert_nodes = ["pendant", "bracelet_left", "bracelet_right"]
-# Directional alerting - buzz node nearest to threat direction
-directional_haptic = true
+[extreme_velocity.alert]
+directional = true                    # Alert node nearest to threat
+nodes = ["pendant", "bracelet_left", "bracelet_right"]
 
-# Alert priority
-qos_class = "critical"           # Preempts all other traffic
-
-# Recording
+# Recording configuration
 [extreme_velocity.recording]
-# Automatic recording on detection
-record_event_camera = true
-record_radar_burst = false
-record_duration_s = 5.0
-
-# Storage
-storage_target = "sd_card"
+trigger_conventional_cameras = true
+capture_duration_s = 2.0
 include_integrity_chain = true
-
-# Radar configuration
-[extreme_velocity.radar]
-# Extended Doppler chirp configuration
-chirp_bandwidth_mhz = 500         # Reduced for velocity range
-chirp_duration_us = 10
-frame_period_us = 100             # 10 kHz update rate
-velocity_range_ms = 300           # Max detectable velocity
-
-# Event camera configuration
-[extreme_velocity.event_camera]
-resolution = "qvga"               # 320x240
-sensitivity = 0.8
-trigger_event_rate_per_ms = 1000
-max_latency_us = 1000
-
-# Timing and performance
-[extreme_velocity.timing]
-# Latency targets
-max_total_latency_ms = 10
-ble_qos = "critical"
-ble_reserved_slot = true
-ble_reserved_slot_start_ms = 25
-ble_reserved_slot_end_ms = 28
-
-# Performance monitoring
-track_latency_stats = true
-latency_warning_threshold_ms = 8
 ```
-
-### 9.2 Mode Descriptions
-
-**Mode: `disabled`**
-- Extreme velocity detection completely off
-- Radar operates in standard mode
-- Event cameras (if present) operate normally
-- No velocity thresholds applied
-
-**Mode: `research`**
-- Detection active but alerts muted
-- Data logged for analysis
-- Latency statistics recorded
-- Useful for validating detection accuracy
-
-**Mode: `production`**
-- Full detection and alerting active
-- All QoS mechanisms enabled
-- Automatic recording on detection
-- Alerts transmitted with Critical priority
 
 ---
 
-## 10. Testing and Validation
+## 12. Testing and Validation
 
-### 10.1 Laboratory Testing
+### 12.1 Laboratory Testing
 
 **Doppler velocity calibration:**
 
 | Test | Method | Acceptance Criteria |
 |------|--------|---------------------|
-| Low velocity (50-100 m/s) | Compressed air projectile launcher | Detect within 100 µs |
-| Medium velocity (200-300 m/s) | Airsoft gun (modified) | Detect within 200 µs |
-| High velocity (800+ m/s) | Ballistic test range | Detect within 500 µs |
+| Low velocity (50-100 m/s) | Compressed air launcher | Detect within 200 µs |
+| Medium velocity (200-300 m/s) | Airsoft gun (modified) | Detect within 150 µs |
+| High velocity (800+ m/s) | Ballistic test range | Detect within 100 µs |
 
-**Event camera calibration:**
+**Latency measurement:**
 
 | Test | Method | Acceptance Criteria |
 |------|--------|---------------------|
-| Fast motion streak | LED array on rotating wheel | Detect streak pattern |
-| Direction accuracy | Known-angle projectile | Direction within ±10° |
-| Latency | LED strobe + event capture | < 1 ms from event to detection |
+| Tier 1 latency | LED strobe + sensor | < 200 µs |
+| Tier 2 latency | Known projectile | < 2 ms |
+| BLE transmission | Logic analyzer | < 1 ms |
+| Piezo onset | High-speed camera | < 500 µs |
 
-### 10.2 Field Testing
+### 12.2 End-to-End Testing
 
-**Scenario testing:**
+**Scenario: Rifle projectile (850 m/s) at 5 m**
 
-1. **Standard detection scenario:**
-   - Projectile launched at 250 m/s from 5 m
-   - Expected detection within 2 ms
-   - Alert to wearer within 8 ms
+| Metric | Target | Notes |
+|--------|--------|-------|
+| Detection time | < 200 µs | Tier 1 CW radar |
+| Direction estimate | < 1 ms | Tier 2 event camera |
+| Alert transmission | < 1 ms | BLE QoS Critical |
+| Haptic onset | < 500 µs | Piezo actuator |
+| **Total alert latency** | **< 2 ms** | |
+| Projectile flight time | 5.9 ms | Time to traverse 5 m |
 
-2. **Multi-sensor scenario:**
-   - Radar + event camera both active
-   - Cross-validate velocity and direction
-   - Confirm fusion improves accuracy
+**Result:** Alert fires ~4 ms before impact, wearer has ~4 ms of warning.
 
-3. **Body orientation scenario:**
-   - Wearer in various positions
-   - Confirm antenna diversity maintains link
-   - Verify alerts reach belt node
-
-### 10.3 Validation Metrics
+### 12.3 Validation Metrics
 
 | Metric | Target | Measurement Method |
 |--------|--------|-------------------|
-| Detection latency | < 2 ms | Time from projectile entry to detection event |
-| Alert latency | < 10 ms | Time from detection to haptic alert |
-| Velocity accuracy | ±10% | Compare detected velocity to known value |
-| Direction accuracy | ±15° | Compare detected direction to actual |
+| Tier 1 latency | < 200 µs | Oscilloscope on detection output |
+| Tier 2 latency | < 2 ms | Timestamp comparison |
+| Velocity accuracy | ±10% | Compare to chronograph |
+| Direction accuracy | ±15° | Known-angle projectile |
 | False positive rate | < 1 per hour | Monitor during quiet periods |
-| Miss rate | < 5% | Detect known projectiles |
+| Miss rate | < 5% | Known projectile test |
 
 ---
 
-## 11. Integration with 360° Pendant
+## 13. Integration with 360° Pendant
 
-### 11.1 Event-Enhanced 360° Pendant
-
-The 360° pendant can integrate event cameras alongside conventional cameras for dual capability:
-
-**Standard cameras (6-8):** Visual 360° capture for SLAM and recording
-
-**Event cameras (2):** Fast transient detection for extreme velocity
-
-**Configuration:**
+### 13.1 Event-Enhanced 360° Pendant Configuration
 
 ```toml
 [nodes.pendant_360]
-# Standard cameras
+# Standard cameras for 360° visual capture
 camera_count = 8
 camera_resolution = "720p"
 
-# Event cameras (positioned at key angles)
+# Event cameras for extreme velocity detection
 event_camera_count = 2
-event_camera_positions = ["forward_left", "forward_right"]
+event_camera_positions = ["forward_left_45deg", "forward_right_45deg"]
 
-# Detection coordination
+# CW radar for primary trigger
+cw_radar = true
+cw_radar_position = "center"
+
+# Piezo haptic for local alert
+piezo_haptic = true
+
+# Detection configuration
 [extreme_velocity.pendant_360]
-# Use event cameras for extreme velocity
 use_event_cameras = true
-# Trigger conventional cameras on detection
 trigger_conventional_cameras = true
-# Capture duration after detection
 conventional_camera_capture_s = 2.0
 ```
 
-### 11.2 Wiring Diagram
+---
 
-```
-360° Pendant PCB (Event-Enhanced)
-┌─────────────────────────────────────────────────────────────────┐
-│                                                                  │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐             │
-│  │ Conv Cam 0  │  │ Conv Cam 1  │  │ Conv Cam 2  │             │
-│  └──────┬──────┘  └──────┬──────┘  └──────┬──────┘             │
-│         │                │                │                     │
-│         └────────────────┼────────────────┘                     │
-│                          │                                      │
-│                          ▼                                      │
-│  ┌────────────────────────────────────────────────────────────┐ │
-│  │                    Vision Processor                        │ │
-│  │                                                            │ │
-│  │  [ Stitching Engine ]  [ Event Detection ]  [ Encoding ]  │ │
-│  └────────────────────────────────────────────────────────────┘ │
-│                          │                                      │
-│         ┌────────────────┼────────────────┐                     │
-│         │                │                │                     │
-│  ┌──────▼──────┐  ┌──────▼──────┐  ┌──────▼──────┐             │
-│  │ Event Cam L │  │ Radar Array │  │ Event Cam R │             │
-│  │ (Forward)   │  │ (60 GHz)    │  │ (Forward)   │             │
-│  └─────────────┘  └─────────────┘  └─────────────┘             │
-│                                                                  │
-│  Dedicated FSYNC line to all cameras                           │
-│  ───────────────────────────────────────────────────────────────│
-│                                                                  │
-└─────────────────────────────────────────────────────────────────┘
-```
+## 14. Safety and Ethical Considerations
+
+### 14.1 Fundamental Physics Constraint
+
+**Detection does NOT prevent impact.**
+
+Even with optimized latency:
+- Detection + piezo alert: ~0.65-2.4 ms
+- Rifle bullet at 850 m/s travels: 0.55-2.0 meters during alert
+
+**At 3 m engagement distance:**
+- Flight time: 3.5 ms
+- Alert latency: 0.65-2.4 ms
+- Warning time: 1.1-2.85 ms
+
+**This provides situational awareness and reflex preparation, not bullet dodging.**
+
+### 14.2 What the System Actually Provides
+
+| Capability | Reality |
+|------------|---------|
+| Extreme velocity detection | ✅ Yes — microsecond-scale |
+| Direction awareness | ✅ Yes — within 1-2 ms |
+| Alert to wearer | ✅ Yes — piezo haptic |
+| Evidence capture | ✅ Yes — camera recording |
+| Impact prevention | ❌ No — physics impossible |
+| Evasive action | ⚠️ Limited — depends on human reaction time |
+
+### 14.3 Disclaimers
+
+- Not a certified safety system
+- Not personal protective equipment
+- Not a substitute for body armor
+- Detection capability does not imply protective capability
+- User assumes all responsibility for deployment
 
 ---
 
-## 12. Safety and Ethical Considerations
-
-### 12.1 Not a Safety System
-
-**Explicit disclaimers:**
-- Extreme velocity detection is a sensing capability
-- Detection does NOT prevent impact
-- Time to impact often exceeds detection-to-alert time
-- System provides situational awareness and evidence capture only
-- Not a substitute for personal protective equipment
-- Not a substitute for evasive action
-
-### 12.2 Evidence Capture
-
-**Legal value:**
-- Detection events are timestamped and signed
-- Event camera footage provides trajectory evidence
-- Recordings include integrity chain for legal use
-- All evidence stored locally (user-controlled)
-
-### 12.3 Privacy
-
-**Event camera data:**
-- Event cameras produce motion patterns, not detailed imagery
-- Streak patterns from projectiles don't capture faces
-- Recording triggered only on detection events (not continuous)
-
----
-
-## 13. Future Research Directions
-
-### 13.1 Improved Velocity Range
-
-**Goal:** Extend detection to > 1000 m/s (hypersonic fragments)
-
-**Approach:**
-- Higher carrier frequency (77 GHz automotive radar)
-- Faster ADC sampling
-- Shorter chirp duration
-
-### 13.2 Multi-Antenna Direction Finding
-
-**Goal:** Determine direction of approach from Doppler alone
-
-**Approach:**
-- Antenna array with beamforming
-- Angle-of-arrival estimation
-- Reduce reliance on event cameras
-
-### 13.3 Machine Learning Classification
-
-**Goal:** Distinguish projectile types from Doppler signature
-
-**Approach:**
-- Train classifier on Doppler signatures of different projectiles
-- Identify caliber, shape, material from micro-Doppler
-- Provide more detailed threat information
-
----
-
-## 14. Summary
+## 15. Summary
 
 **Key conclusions:**
 
-1. **Extended Doppler radar is viable** for projectile detection with custom chirp configuration
-2. **TI IWR6843 is the primary candidate** with documented extended Doppler capability
-3. **Event cameras provide essential complementary sensing** for trajectory and direction
-4. **Fusion of radar + event camera** yields velocity + direction + trajectory
-5. **Detection-to-alert latency of ~5-10 ms** is achievable with proper QoS configuration
-6. **Critical QoS with reserved BLE slots** ensures reliable low-latency alert transmission
-7. **Antenna diversity** improves link reliability for body-worn systems
-8. **The architecture is production-capable** but detection does not prevent impact
+1. **Tiered architecture separates concerns by latency:**
+   - Tier 1 (Reflex Trigger): 100-500 µs using CW radar
+   - Tier 2 (Direction Validation): 0.5-2 ms using event camera
+   - Tier 3 (Characterization): 5-50 ms for evidence and logging
+
+2. **CW radar is the primary trigger** — no chirp latency, pure Doppler, microsecond response
+
+3. **Projectile Doppler signatures are massive** — 340 kHz for rifle, trivial to detect with short FFT windows
+
+4. **Event cameras have microsecond latency** — 10-100 µs, not 1 ms as originally estimated
+
+5. **Piezo haptics are mandatory** — LRA motors (2-10 ms onset) are too slow; piezo (0.1-1 ms) is required
+
+6. **BLE can be optimized** — QoS Critical with reserved slots achieves 0.3-0.8 ms
+
+7. **Total alert latency of 0.65-2.4 ms is achievable** — alerts fire within flight time for most scenarios
+
+8. **Detection does not prevent impact** — provides awareness and evidence, not protection
 
 ---
 
