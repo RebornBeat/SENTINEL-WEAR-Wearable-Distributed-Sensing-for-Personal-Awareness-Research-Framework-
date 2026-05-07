@@ -223,7 +223,8 @@ BLE Connection Event (30 ms interval)
 ├── Slot 17-20 ms: Bracelet L → Belt (detection)
 ├── Slot 20-22 ms: Belt → Bracelet R (sync)
 ├── Slot 22-25 ms: Bracelet R → Belt (detection)
-├── Slot 25-30 ms: Reserved (alerts, retransmits, eyewear)
+├── Slot 25-28 ms: RESERVED (critical alerts, extreme velocity)
+└── Slot 28-30 ms: Reserved (retransmits, eyewear)
 ```
 
 **Connection interval tradeoffs:**
@@ -236,6 +237,35 @@ BLE Connection Event (30 ms interval)
 | 100 ms | ~60 ms | 2-5 mW | Power saving |
 | 1000 ms | ~600 ms | <1 mW | Sleep mode |
 
+### QoS Classes and Priority
+
+**Traffic is prioritized by class:**
+
+| QoS Class | Priority | Traffic Types | Latency Target |
+|-----------|----------|---------------|----------------|
+| Critical | Highest (preempts all other traffic) | Extreme velocity detection, fall detection, emergency alerts | < 5 ms |
+| High | Second (preferential queue) | Gait anomaly, stumble precursor | < 20 ms |
+| Medium | Third (normal scheduling) | Presence detection, position tracking | < 50 ms |
+| Low | Fourth (bandwidth available) | Battery status, health telemetry | < 500 ms |
+
+**Critical QoS behavior:**
+- Messages tagged Critical bypass normal scheduling
+- Transmit immediately, preempting ongoing transmissions
+- Reserved slot (25-28 ms) guaranteed every cycle for critical alerts
+- Essential for extreme velocity detection latency requirements
+
+### Dynamic Scheduling
+
+**Context-aware scheduling adjusts based on activity:**
+
+| Context | Schedule Adjustment |
+|---------|---------------------|
+| Walking detected | Prioritize anklets (gait timing critical) |
+| Threat detected | Prioritize pendant (sensing critical) |
+| Idle state | Extend intervals (power saving) |
+| Streaming active | Shift heavy traffic to UWB |
+| Extreme velocity alert | Preempt all other traffic |
+
 ### Node Priority for Bandwidth Allocation
 
 | Priority | Node | Reason |
@@ -245,6 +275,51 @@ BLE Connection Event (30 ms interval)
 | 3 | Pendant | Primary sensing, highest information value |
 | 4 | Bracelets | Secondary sensing |
 | 5 (Lowest) | Eyewear | Optional, supplementary |
+
+### Antenna Diversity (Belt Node and Optionally Other Nodes)
+
+**Problem:** Human body absorbs and blocks 2.4 GHz RF significantly. Torso absorption: 10-30 dB. Arm position changes: 5-15 dB variation.
+
+**Solution:** Single BLE radio with multiple antenna paths. Radio dynamically selects best antenna.
+
+```
+Belt Node BLE Radio
+    │
+    ├── Antenna Switch
+    │       ├── Left-side antenna (toward wearer's left)
+    │       └── Right-side antenna (toward wearer's right)
+    │
+    └── Radio selects antenna with best RSSI
+```
+
+**Benefits:**
+- Reduced packet loss from body shadowing
+- Lower retries → deterministic latency
+- Reliable transmission regardless of body orientation
+- Critical for extreme velocity detection reliability
+- No self-interference (only one transmitter active at a time)
+
+**Why antenna diversity, not multiple BLE radios:**
+
+| Approach | Self-Interference | Complexity | Power | Benefit |
+|----------|-------------------|------------|-------|---------|
+| Multi-radio BLE | High (desense, coupling) | High | High | Marginal bandwidth gain |
+| Antenna diversity | None | Low | Low | Reliability improvement |
+| Dynamic scheduling | None | Firmware only | Zero | Latency improvement |
+| QoS classes | None | Firmware only | Zero | Critical traffic priority |
+
+**Multi-radio BLE is NOT recommended for SENTINEL-WEAR:**
+- RF complexity exceeds benefits at this scale (4-6 nodes)
+- Self-interference from closely-spaced radios
+- Antenna coupling and desense problems
+- Increased power consumption
+- Increased firmware complexity
+
+**Antenna diversity IS recommended:**
+- Single radio, multiple antenna paths
+- No self-interference
+- Improved reliability without RF chaos
+- Appropriate for wearable scale
 
 ### UWB Role Configuration
 
@@ -438,6 +513,7 @@ Primary compute, battery hub, torso reference, **sole external network gateway**
 | UWB | Disabled / Enabled | For precision timing with nodes |
 | WiFi band preference | 5 GHz preferred / 2.4 GHz only | For RF coexistence |
 | Battery capacity | 2000 / 5000 / 7000 mAh | Based on variant and enclosure |
+| Antenna diversity | Disabled / Enabled | Dual BLE antennas |
 
 #### Power Budget Analysis
 
@@ -742,6 +818,25 @@ At 3-meter engagement distance:
 - **Total detection:** < 1 ms
 - **Remaining budget:** 2.5-7.5 ms (for user response or out-of-scope countermeasures)
 
+### Latency Optimization for Extreme Velocity
+
+**Latency breakdown with improvements:**
+
+| Stage | Standard Latency | Optimized Latency | Improvement |
+|-------|------------------|-------------------|-------------|
+| Doppler detection | 10-100 µs | 10-100 µs | Hardware limited |
+| Event camera trigger | < 1 ms | < 1 ms | Hardware limited |
+| MCU processing | 100-500 µs | 100-500 µs | CPU limited |
+| BLE queue | 0-30 ms | **0-5 ms** | QoS Critical preempt |
+| BLE transmission | 1-3 ms | 1-3 ms | Fixed |
+| Belt reception | < 1 ms | < 1 ms | Fixed |
+| Alert decision | 100-500 µs | 100-500 µs | Fixed |
+| Haptic trigger | < 1 ms | < 1 ms | Fixed |
+| **Total worst case** | **~35 ms** | **~8 ms** | **4× improvement** |
+| **Total best case** | **~5 ms** | **~3 ms** | **1.7× improvement** |
+
+**Key optimization: QoS = Critical with preemption**
+
 ### Hardware Configuration
 
 ```toml
@@ -753,6 +848,8 @@ event_camera_always_on = true
 min_velocity_ms = 50            # Ignore objects below this velocity
 max_detection_distance_m = 10
 alert_on_detection = true
+qos_class = "critical"          # Preempts all other BLE traffic
+processing_priority = "realtime" # Preempts other processing
 ```
 
 ### Integration with 360° Pendant
@@ -1118,6 +1215,96 @@ Enclosure designs for all node types:
 - IP rating: IP67 for bracelets, anklets, pendant (water exposure)
 - IP54 for belt node (splashes, not submersion)
 - EN 1811:2011 nickel release compliance
+
+---
+
+## Deployment Paths — Recommended Configurations
+
+Different users have different needs. Below are recommended configurations for common scenarios.
+
+### Path 1: Basic Awareness (Minimal Cost)
+
+**Target user:** Casual user wanting basic presence awareness, minimal investment.
+
+| Node | Variant/Config | Notes |
+|------|----------------|-------|
+| Belt | Variant A (MCU) or D (ESP32) | No SLAM, sparse tracking only |
+| Pendant | Variant A, no camera | Basic sensing |
+| Bracelets | Minimal config | No camera, no UWB |
+| Anklets | Minimal config | Basic gait detection |
+| Eyewear | Not included | |
+| **Runtime** | 12-20 hours | |
+| **Capabilities** | Sparse tracking, haptic alerts, no streaming | |
+
+### Path 2: Standard Personal Awareness
+
+**Target user:** Consumer wanting full awareness with streaming capability.
+
+| Node | Variant/Config | Notes |
+|------|----------------|-------|
+| Belt | Variant B (Linux SoM) | Full SLAM, streaming capable |
+| Pendant | Variant A with camera | Basic sensing with visual capture |
+| Bracelets | Standard config | |
+| Anklets | Extended config | Enhanced gait analysis |
+| Eyewear | Optional, Variant A | Fast transient detection |
+| **Runtime** | 10-15 hours (sparse), 5-8 hours (active) | |
+| **Capabilities** | Sparse + dense SLAM, streaming, recording | |
+
+### Path 3: Security Professional
+
+**Target user:** Security personnel, private investigators, journalists requiring 360° awareness.
+
+| Node | Variant/Config | Notes |
+|------|----------------|-------|
+| Belt | Variant B or C (Linux SoM) | Full compute capability |
+| Pendant | Variant B (360° Curved) | 8-camera 360° capture |
+| Bracelets | Extended with camera | Enhanced coverage |
+| Anklets | Extended config | |
+| Eyewear | Variant B or C | Forward visual context |
+| **Runtime** | 5-8 hours (full active) | |
+| **Capabilities** | Full 360° awareness, dense SLAM, legal evidence capture | |
+
+### Path 4: Extended Runtime / Continuous Use
+
+**Target user:** Users requiring 24/7 operation (security shifts, continuous monitoring).
+
+| Node | Variant/Config | Notes |
+|------|----------------|-------|
+| Belt | Variant E (Hot-swappable battery) | Swap batteries without downtime |
+| Pendant | Variant D (Tactical) or B (360°) | Extended battery or belt power input |
+| Bracelets | Standard config | |
+| Anklets | Standard config | |
+| Eyewear | Optional | |
+| **Runtime** | Unlimited (with battery swaps) | |
+| **Capabilities** | Full capability with no downtime | |
+
+### Path 5: Extreme Velocity Detection
+
+**Target user:** Users operating in environments with potential for high-speed threats.
+
+| Node | Variant/Config | Notes |
+|------|----------------|-------|
+| Belt | Variant B or C | High compute for fast processing |
+| Pendant | Variant E (Event-Enhanced) | Event cameras for fast transient detection |
+| Bracelets | Standard config | |
+| Anklets | Standard config | |
+| Eyewear | Variant A (Event-only) | Fast forward detection |
+| **Runtime** | 8-12 hours | |
+| **Capabilities** | Full awareness + projectile detection within millisecond windows | |
+
+### Path 6: Accessibility (Visually Impaired)
+
+**Target user:** Visually impaired users wanting haptic spatial awareness.
+
+| Node | Variant/Config | Notes |
+|------|----------------|-------|
+| Belt | Variant B (Linux SoM) | Rich audio processing for spatial description |
+| Pendant | Variant B (360° Curved) | Full environmental context |
+| Bracelets | Standard config | Directional haptics essential |
+| Anklets | Standard config | Ground-level awareness |
+| Eyewear | Not typically used | |
+| **Runtime** | 10-15 hours | |
+| **Capabilities** | Haptic directional alerts, audio scene description, obstacle detection | |
 
 ---
 
