@@ -145,6 +145,7 @@ Both modes run simultaneously when hardware supports it. Mode A always runs. Mod
 │  → Moderate-bandwidth continuous (single camera at 720p-1080p)               │
 │  → High-bandwidth BURSTS (compressed clips, short recordings)                │
 │  → 360° at 2K-2.5K resolution                                                │
+│  → All 8 cameras at QVGA-VGA simultaneously                                  │
 │  → Optional on nodes, enabled per configuration                              │
 │  → Power: 50-150 mW when active                                              │
 ├─────────────────────────────────────────────────────────────────────────────┤
@@ -162,6 +163,27 @@ Both modes run simultaneously when hardware supports it. Mode A always runs. Mod
 │  → Used when WiFi unavailable (remote access, away from home)               │
 │  → Power: 150-1200 mW depending on module and activity                       │
 └─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### UWB Bandwidth Capabilities — Detailed
+
+UWB supports continuous streaming at appropriate resolutions:
+
+| Stream Type | Bandwidth Required | UWB Capability | Notes |
+|-------------|-------------------|----------------|-------|
+| 8 cameras × QVGA MJPEG | ~0.5-1 Mbps | ✅ Easily handled | Instant baseline for 360° |
+| 8 cameras × VGA H.264 | ~2-4 Mbps | ✅ Handled | Standard quality for all cameras |
+| Stitched 360° at 2K H.264 | ~3-4 Mbps | ✅ Handled | Good quality panorama |
+| Stitched 360° at 2.5K H.264 | ~5-6 Mbps | ✅ At max | High quality panorama |
+| Stitched 360° at 4K H.264 | ~8-15 Mbps | ❌ Exceeds | Requires WiFi |
+
+**Tiered Progressive Quality Strategy:** When bandwidth is constrained, the system starts with low-resolution baseline and progressively improves:
+
+```
+Phase 1 (Instant):     8 cameras at QVGA → complete 360° view immediately
+Phase 2 (Progressive): Send higher-res keyframes sequentially over 5-10 seconds
+Phase 3 (Continuous):  Maintain low-res baseline, periodic high-res keyframes
+Result:                Functional immediately, quality improves over time
 ```
 
 ### Supported Cellular Modules (Belt Node Only)
@@ -266,6 +288,20 @@ BLE Connection Event (30 ms interval)
 | Streaming active | Shift heavy traffic to UWB |
 | Extreme velocity alert | Preempt all other traffic |
 
+**Configuration:**
+
+```toml
+[ban.scheduling]
+mode = "dynamic"               # "static" | "dynamic"
+
+[ban.scheduling.dynamic]
+walking_anklet_priority_boost = 1.5
+threat_pendant_priority_boost = 2.0
+idle_interval_multiplier = 2.0
+streaming_shift_to_uwb = true
+extreme_velocity_preempt = true
+```
+
 ### Node Priority for Bandwidth Allocation
 
 | Priority | Node | Reason |
@@ -321,6 +357,17 @@ Belt Node BLE Radio
 - Improved reliability without RF chaos
 - Appropriate for wearable scale
 
+**Configuration:**
+
+```toml
+[ban.antenna_diversity]
+enabled = true
+antenna_count = 2              # 1 = single, 2 = diversity
+selection_mode = "rssi"        # "rssi" | "packet_loss" | "manual"
+switch_threshold_db = 5        # Switch if other antenna is 5 dB better
+preferred_antenna = "auto"     # "left" | "right" | "auto"
+```
+
 ### UWB Role Configuration
 
 UWB can be enabled on any node with UWB hardware. Roles:
@@ -343,6 +390,17 @@ UWB can be enabled on any node with UWB hardware. Roles:
 - Useful for: single camera streaming, 360° at 2K resolution
 - Power: higher sustained draw (50-150 mW)
 
+**Configuration:**
+
+```toml
+[ban.uwb]
+enabled = false
+role = "timing_and_ranging"     # "timing_only" | "timing_and_ranging" | "full_bandwidth"
+streaming_fallback = false      # Use UWB for camera streaming when WiFi unavailable
+max_sustained_mbps = 5          # Conservative limit for thermal management
+nodes_with_uwb = ["pendant", "anklet_left", "anklet_right"]
+```
+
 ### RF Coexistence
 
 **Frequency bands in use:**
@@ -362,6 +420,7 @@ UWB can be enabled on any node with UWB hardware. Roles:
 [rf_coexistence]
 wifi_prefer_5ghz = true        # Strongly recommended
 ble_wifi_timeshare = false     # Set true if 2.4 GHz WiFi must be used
+ble_gap_during_wifi_ms = 5     # Gap between BLE and WiFi if sharing
 ```
 
 ---
@@ -413,6 +472,14 @@ The highest-information-value node. Hardware variants and configuration options:
 - Purpose: Users who need the full sensing stack including fast transient detection
 - Configuration: Standard cameras for visual + event cameras for Doppler-triggered capture
 
+**Variant F — Long-Range Detection**
+- Higher-power CW radar (dedicated module, not AOP)
+- Optimized antenna for range
+- Trade range resolution for maximum detection distance
+- Standard event camera for direction
+- Purpose: Maximize detection range for rifle detection at 100+ meters
+- Target: Detect rifle fire at 150+ meters with 150+ ms warning time
+
 #### Configuration Options (Same PCB, Different Population/Settings)
 
 For Standard and Medallion variants, these are configuration options (not separate hardware variants):
@@ -423,6 +490,7 @@ For Standard and Medallion variants, these are configuration options (not separa
 | UWB | Disabled / Enabled | PCB has footprint, module optionally populated |
 | Battery | 150 / 250 / 400 mAh | Same enclosure, different cell |
 | Microphones | 3 / 4 / 6 element | Same footprint, different population |
+| Extended Doppler | Disabled / Enabled | For extreme velocity detection |
 
 For 360° Curved variant, these are configuration options:
 
@@ -514,6 +582,20 @@ Primary compute, battery hub, torso reference, **sole external network gateway**
 | WiFi band preference | 5 GHz preferred / 2.4 GHz only | For RF coexistence |
 | Battery capacity | 2000 / 5000 / 7000 mAh | Based on variant and enclosure |
 | Antenna diversity | Disabled / Enabled | Dual BLE antennas |
+
+#### Haptic Configuration (All Variants)
+
+| Option | Values | Notes |
+|--------|--------|-------|
+| Haptic type | LRA / Piezo / Both | Piezo provides faster onset (0.5-1 ms) |
+| Directional haptics | Disabled / Enabled | Multiple actuators for threat direction |
+| Actuator count | 1 / 2 / 4 | Around belt circumference |
+
+**Piezo vs LRA haptics:**
+- LRA onset: 2-10 ms
+- Piezo onset: 0.5-1 ms
+- For extreme velocity detection at close range (< 15 m), piezo provides faster alert
+- For rifle detection at 100+ m, LRA is sufficient (flight time is 117+ ms)
 
 #### Power Budget Analysis
 
@@ -792,6 +874,36 @@ All cameras must capture simultaneously for clean stitching:
 
 The extreme velocity sensing architecture (Doppler radar + event camera fusion) is designed for **production use**, not just research. This enables detection of fast-moving objects (bullets, debris, fragments) within the body-frame awareness field.
 
+### Realistic Engagement Distances
+
+**Key insight:** The original analysis over-constrained to 3-meter "point-blank" scenarios. Realistic engagements occur at much greater distances with significantly more warning time.
+
+**Detection and warning at realistic distances:**
+
+| Weapon | Velocity | Distance | Flight Time | Detection+Alert | Warning Time |
+|--------|----------|----------|-------------|-----------------|--------------|
+| Rifle | 850 m/s | 50 m | 58.8 ms | 0.65-2.4 ms | **56-58 ms** |
+| Rifle | 850 m/s | 100 m | 117.6 ms | 0.65-2.4 ms | **115-117 ms** |
+| Rifle | 850 m/s | 200 m | 235.3 ms | 0.65-2.4 ms | **233-235 ms** |
+| Handgun | 350 m/s | 10 m | 28.6 ms | 0.65-2.4 ms | **26-28 ms** |
+| Handgun | 350 m/s | 15 m | 42.9 ms | 0.65-2.4 ms | **40-42 ms** |
+
+**Implications:**
+- At 100+ meters (rifle), warning time is 115+ ms — well within human reaction time
+- At 50+ meters (rifle), warning time is 56+ ms — sufficient for reflex response
+- At 10-15 meters (handgun), warning time is 26-42 ms — awareness but limited response time
+- LRA haptics (2-10 ms onset) are sufficient for realistic rifle distances
+- Piezo haptics (0.5-1 ms onset) provide additional margin for close-range scenarios
+
+### Detection Range vs Latency
+
+**The primary optimization target is detection range, not detection latency.**
+
+- Detection latency (50-150 µs) is trivial compared to any realistic flight time
+- Detection range determines warning time margin
+- Longer detection range = more warning time
+- Latency optimization is valuable but secondary to range optimization
+
 ### Sensor Requirements
 
 **Doppler Radar (mmWave):**
@@ -801,41 +913,26 @@ The extreme velocity sensing architecture (Doppler radar + event camera fusion) 
 - CW (Continuous Wave) mode preferred for zero scanning latency
 
 **Event Camera:**
-- Microsecond-latency motion detection
+- Microsecond-latency motion detection (10-100 µs, not 1 ms)
 - Triggers on rapid angular motion across pixel array
 - Provides trajectory vector for approaching object
 
-### Reaction Time Budget
+### Tiered Detection Architecture
 
-At 3-meter engagement distance:
-- Rifle velocity (850 m/s): **3.5 ms** from entry to impact
-- Handgun velocity (350 m/s): **8.5 ms** from entry to impact
+**Tier 1 — Reflex Trigger (50-150 µs):**
+- CW radar threshold detection
+- Local haptic trigger
+- Purpose: Immediate awareness
 
-**Detection budget:**
-- Doppler detection: 10-100 microseconds
-- Event camera trigger: < 1 ms
-- Processing and alert decision: 100-500 microseconds
-- **Total detection:** < 1 ms
-- **Remaining budget:** 2.5-7.5 ms (for user response or out-of-scope countermeasures)
+**Tier 2 — Direction Validation (100-500 µs):**
+- Event camera streak analysis
+- Direction estimation
+- Purpose: Directional alert routing
 
-### Latency Optimization for Extreme Velocity
-
-**Latency breakdown with improvements:**
-
-| Stage | Standard Latency | Optimized Latency | Improvement |
-|-------|------------------|-------------------|-------------|
-| Doppler detection | 10-100 µs | 10-100 µs | Hardware limited |
-| Event camera trigger | < 1 ms | < 1 ms | Hardware limited |
-| MCU processing | 100-500 µs | 100-500 µs | CPU limited |
-| BLE queue | 0-30 ms | **0-5 ms** | QoS Critical preempt |
-| BLE transmission | 1-3 ms | 1-3 ms | Fixed |
-| Belt reception | < 1 ms | < 1 ms | Fixed |
-| Alert decision | 100-500 µs | 100-500 µs | Fixed |
-| Haptic trigger | < 1 ms | < 1 ms | Fixed |
-| **Total worst case** | **~35 ms** | **~8 ms** | **4× improvement** |
-| **Total best case** | **~5 ms** | **~3 ms** | **1.7× improvement** |
-
-**Key optimization: QoS = Critical with preemption**
+**Tier 3 — Characterization (5-50 ms):**
+- FMCW burst for range + velocity
+- Evidence capture
+- Purpose: Forensic analysis, logging
 
 ### Hardware Configuration
 
@@ -843,13 +940,22 @@ At 3-meter engagement distance:
 [extreme_velocity]
 enabled = false                 # Opt-in feature
 mode = "production"             # "disabled" | "research" | "production"
-doppler_update_rate_hz = 10000  # High update rate for fast transients
-event_camera_always_on = true
-min_velocity_ms = 50            # Ignore objects below this velocity
-max_detection_distance_m = 10
-alert_on_detection = true
-qos_class = "critical"          # Preempts all other BLE traffic
-processing_priority = "realtime" # Preempts other processing
+
+[extreme_velocity.detection]
+# Optimization target
+optimization_target = "range"   # "range" | "latency" | "balanced"
+
+# Range-optimized configuration
+target_range_m = 150           # Detect at 150 m for 175+ ms warning
+
+# CW radar parameters
+radar_mode = "continuous_wave"
+fft_window_us = 32             # 32 µs window sufficient for projectile Doppler
+velocity_threshold_ms = 50     # Ignore below 50 m/s
+
+# QoS for alerts
+qos_class = "critical"         # Preempts all other BLE traffic
+reserved_slot = true
 ```
 
 ### Integration with 360° Pendant
@@ -858,6 +964,7 @@ The 360° pendant can integrate event cameras:
 - **Variant E — Event-Enhanced:** 6 conventional + 2 event cameras
 - Event cameras positioned at key angles (e.g., forward ± 30°)
 - Conventional cameras provide color/detail; event cameras provide velocity detection
+- **Variant F — Long-Range Detection:** Higher-power radar for 150+ m detection
 
 ---
 
@@ -888,7 +995,7 @@ The 360° pendant can integrate event cameras:
 │  Extreme Velocity Layer (Production-Capable)                                 │
 │  Doppler radar (CW mode, extended velocity range)                            │
 │  Event camera (microsecond detection)                                        │
-│  Fusion for projectile detection within 3.5-8.5 ms window                     │
+│  Fusion for projectile detection within realistic engagement windows          │
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -930,6 +1037,7 @@ sentinel-wear/
 │   ├── guides/
 │   │   ├── getting_started.md
 │   │   ├── body_frame_calibration.md
+```
 │   │   ├── alert_modalities.md
 │   │   ├── calibration_360_pendant.md
 │   │   ├── power_profiles.md
@@ -1144,6 +1252,21 @@ What SENTINEL-WEAR does with what it perceives:
 | FallDetected | Extended buzz 1000ms | Critical | All nodes |
 | FastObjectDetected | Rapid pulses (50ms × 5) | Critical | Pendant, eyewear |
 
+### Directional Haptic Routing
+
+**Directional haptics** provide spatially-relevant alerts:
+
+| Threat Direction | Primary Haptic | Secondary Haptic |
+|------------------|----------------|------------------|
+| Front | Pendant piezo | Both bracelets (light) |
+| Front-left | Left bracelet (strong) | Pendant (light) |
+| Left | Left bracelet (strong) | Anklet left (light) |
+| Rear-left | Left anklet (strong) | Left bracelet (light) |
+| Rear | Both anklets | Both bracelets (light) |
+| Rear-right | Right anklet (strong) | Right bracelet (light) |
+| Right | Right bracelet (strong) | Anklet right (light) |
+| Front-right | Right bracelet (strong) | Pendant (light) |
+
 ---
 
 ## Gait Analysis
@@ -1215,96 +1338,6 @@ Enclosure designs for all node types:
 - IP rating: IP67 for bracelets, anklets, pendant (water exposure)
 - IP54 for belt node (splashes, not submersion)
 - EN 1811:2011 nickel release compliance
-
----
-
-## Deployment Paths — Recommended Configurations
-
-Different users have different needs. Below are recommended configurations for common scenarios.
-
-### Path 1: Basic Awareness (Minimal Cost)
-
-**Target user:** Casual user wanting basic presence awareness, minimal investment.
-
-| Node | Variant/Config | Notes |
-|------|----------------|-------|
-| Belt | Variant A (MCU) or D (ESP32) | No SLAM, sparse tracking only |
-| Pendant | Variant A, no camera | Basic sensing |
-| Bracelets | Minimal config | No camera, no UWB |
-| Anklets | Minimal config | Basic gait detection |
-| Eyewear | Not included | |
-| **Runtime** | 12-20 hours | |
-| **Capabilities** | Sparse tracking, haptic alerts, no streaming | |
-
-### Path 2: Standard Personal Awareness
-
-**Target user:** Consumer wanting full awareness with streaming capability.
-
-| Node | Variant/Config | Notes |
-|------|----------------|-------|
-| Belt | Variant B (Linux SoM) | Full SLAM, streaming capable |
-| Pendant | Variant A with camera | Basic sensing with visual capture |
-| Bracelets | Standard config | |
-| Anklets | Extended config | Enhanced gait analysis |
-| Eyewear | Optional, Variant A | Fast transient detection |
-| **Runtime** | 10-15 hours (sparse), 5-8 hours (active) | |
-| **Capabilities** | Sparse + dense SLAM, streaming, recording | |
-
-### Path 3: Security Professional
-
-**Target user:** Security personnel, private investigators, journalists requiring 360° awareness.
-
-| Node | Variant/Config | Notes |
-|------|----------------|-------|
-| Belt | Variant B or C (Linux SoM) | Full compute capability |
-| Pendant | Variant B (360° Curved) | 8-camera 360° capture |
-| Bracelets | Extended with camera | Enhanced coverage |
-| Anklets | Extended config | |
-| Eyewear | Variant B or C | Forward visual context |
-| **Runtime** | 5-8 hours (full active) | |
-| **Capabilities** | Full 360° awareness, dense SLAM, legal evidence capture | |
-
-### Path 4: Extended Runtime / Continuous Use
-
-**Target user:** Users requiring 24/7 operation (security shifts, continuous monitoring).
-
-| Node | Variant/Config | Notes |
-|------|----------------|-------|
-| Belt | Variant E (Hot-swappable battery) | Swap batteries without downtime |
-| Pendant | Variant D (Tactical) or B (360°) | Extended battery or belt power input |
-| Bracelets | Standard config | |
-| Anklets | Standard config | |
-| Eyewear | Optional | |
-| **Runtime** | Unlimited (with battery swaps) | |
-| **Capabilities** | Full capability with no downtime | |
-
-### Path 5: Extreme Velocity Detection
-
-**Target user:** Users operating in environments with potential for high-speed threats.
-
-| Node | Variant/Config | Notes |
-|------|----------------|-------|
-| Belt | Variant B or C | High compute for fast processing |
-| Pendant | Variant E (Event-Enhanced) | Event cameras for fast transient detection |
-| Bracelets | Standard config | |
-| Anklets | Standard config | |
-| Eyewear | Variant A (Event-only) | Fast forward detection |
-| **Runtime** | 8-12 hours | |
-| **Capabilities** | Full awareness + projectile detection within millisecond windows | |
-
-### Path 6: Accessibility (Visually Impaired)
-
-**Target user:** Visually impaired users wanting haptic spatial awareness.
-
-| Node | Variant/Config | Notes |
-|------|----------------|-------|
-| Belt | Variant B (Linux SoM) | Rich audio processing for spatial description |
-| Pendant | Variant B (360° Curved) | Full environmental context |
-| Bracelets | Standard config | Directional haptics essential |
-| Anklets | Standard config | Ground-level awareness |
-| Eyewear | Not typically used | |
-| **Runtime** | 10-15 hours | |
-| **Capabilities** | Haptic directional alerts, audio scene description, obstacle detection | |
 
 ---
 
