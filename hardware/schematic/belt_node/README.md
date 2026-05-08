@@ -789,101 +789,168 @@ monitor_ntc = true                    # Use NTC thermistor
 | Feature disable | Disable SLAM above threshold | No dense mapping |
 | Active cooling (Variant E only) | Small fan in belt pack | Noise, power draw |
 
----
-
-## 12. RF Coexistence
+## 12. RF Coexistence Architecture
 
 ### 12.1 Frequency Bands in Use
 
-| Radio | Frequency | Potential Conflicts |
-|-------|-----------|---------------------|
-| BLE | 2.4 GHz ISM | WiFi 2.4 GHz |
-| WiFi | 2.4 GHz and 5 GHz | BLE (at 2.4 GHz) |
-| UWB | 3.1-10.6 GHz | None (separate band) |
-| mmWave radar | 60 GHz | None (separate band) |
-| Cellular | 700 MHz - 3.5 GHz, 24-47 GHz (5G mmWave) | Minor interaction possible |
+| Radio | Frequency | Potential Conflicts | Mitigation |
+|-------|-----------|---------------------|------------|
+| BLE | 2.4 GHz ISM | WiFi 2.4 GHz | Prefer WiFi 5 GHz, antenna diversity |
+| WiFi | 2.4 GHz and 5 GHz | BLE (at 2.4 GHz) | Prefer 5 GHz band |
+| UWB | 3.1-10.6 GHz | None | Separate band, no conflict |
+| mmWave radar | 60 GHz | None | Separate band, no conflict |
+| Cellular LTE | 700 MHz - 2.6 GHz | Minor adjacent to 2.4 GHz | Antenna separation |
+| Cellular 5G Sub-6 | 3.5 GHz | Minor adjacent to UWB | Antenna separation |
+| Cellular 5G mmWave | 24-47 GHz | None | Separate band |
 
 ### 12.2 Coexistence Strategies
 
-**Strategy 1: WiFi prefers 5 GHz band**
-- Eliminates conflict with BLE (which uses 2.4 GHz)
-- Default configuration
+#### Strategy 1: WiFi Prefers 5 GHz Band (Primary)
 
-**Strategy 2: Antenna separation on belt enclosure**
-- Cellular/WiFi antennas on exterior of belt (facing outward)
-- BLE/UWB antennas on interior (facing body)
-- Physical separation reduces coupling
-
-**Strategy 3: Antenna diversity for BLE**
-- Dual BLE antennas (left and right side of belt)
-- Single BLE radio selects best antenna dynamically
-- Eliminates body shadowing without multi-radio complexity
-
-**Strategy 4: Time-division multiplexing**
-- If 2.4 GHz WiFi must be used, coordinate timing with BLE connection events
-- BLE gaps during WiFi transmission
+- Most modern routers support 5 GHz
+- BLE operates at 2.4 GHz — no conflict
+- **Strongly recommended default configuration**
 
 ```toml
 [rf_coexistence]
-wifi_prefer_5ghz = true        # Strongly recommended
-ble_wifi_timeshare = false     # Set true if 2.4 GHz WiFi must be used
-ble_gap_during_wifi_ms = 5     # Gap between BLE and WiFi if sharing 2.4 GHz
+wifi_prefer_5ghz = true        # Default, strongly recommended
 ```
 
-### 12.3 Antenna Placement
+#### Strategy 2: Antenna Separation on Belt Enclosure
 
 ```
-Belt Node Enclosure (Cross-Section)
-
-    ┌─────────────────────────────────────────────────────────────┐
-    │                                                             │
-    │   [Cellular Antenna]              [WiFi Antenna]            │  ← Exterior
-    │   (U.FL to external)              (U.FL to external)        │
-    │                                                             │
-    │   ┌───────────────────────────────────────────────────┐   │
-    │   │              PCB / Electronics                     │   │
-    │   │                                                   │   │
-    │   │   [BLE Antenna L]            [BLE Antenna R]      │   │  ← Interior
-    │   │   (PCB trace or chip)         (PCB trace or chip) │   │     (toward body)
-    │   │                                                   │   │
-    │   └───────────────────────────────────────────────────┘   │
-    │                                                             │
-    └─────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-                          Wearer's body
+Belt Node Enclosure (Top View)
+┌─────────────────────────────────────────────────────────────────┐
+│                                                                 │
+│   [Cellular Antenna]                    [WiFi Antenna]          │
+│   (Exterior, separate from body)        (Exterior)              │
+│                                                                 │
+│   ┌─────────────────────────────────────────────────────┐      │
+│   │              PCB / Internal Electronics             │      │
+│   │                                                     │      │
+│   │   [BLE Antenna L]         [BLE Antenna R]           │      │
+│   │   (Interior, toward body for BAN)                   │      │
+│   │                                                     │      │
+│   └─────────────────────────────────────────────────────┘      │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
 ```
+
+**Principle:**
+- Cellular/WiFi antennas on exterior of belt (better propagation, away from body)
+- BLE antennas on interior (body is the communication medium for BAN)
+- Physical separation between 2.4 GHz antennas reduces coupling
+
+#### Strategy 3: Time-Division Multiplexing (When 2.4 GHz WiFi Required)
+
+- BLE connection events scheduled during WiFi idle periods
+- BLE gaps during WiFi transmission
+- Requires coordination between WiFi and BLE firmware
+
+```toml
+[rf_coexistence]
+ble_wifi_timeshare = false     # Set true only if 2.4 GHz WiFi required
+ble_gap_during_wifi_ms = 5     # Gap between BLE and WiFi if sharing
+```
+
+### 12.3 Why Multi-Radio BLE Is NOT Recommended
+
+**Problem with multi-radio BLE approach:**
+
+Multiple BLE radios on the same belt would:
+- Share the same 2.4 GHz spectrum
+- Have antennas centimeters apart
+- Cause self-interference (receiver desensitization)
+- Require complex coexistence firmware
+- Increase power consumption significantly
+
+**Antenna diversity (single radio, multiple antennas) provides the reliability improvement without the complexity.**
+
+| Approach | Self-Interference | Power | Complexity | Reliability Gain |
+|----------|-------------------|-------|------------|------------------|
+| Single BLE + diversity | None | Low | Moderate | High |
+| Multi-radio BLE | High risk | High | Very High | Uncertain |
 
 ---
 
 ## 13. Storage Architecture
 
-### 13.1 Storage Options
+### 13.1 Storage Hierarchy
 
-| Storage | Capacity | Use |
-|---------|----------|-----|
-| microSD card (removable) | Up to 2 TB | Primary recording storage, removable for physical access |
-| Internal eMMC (Linux SoM) | 8-32 GB | Firmware, configuration, temporary storage |
-| External USB drive | Unlimited | Extended storage for large deployments |
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         STORAGE ARCHITECTURE                                │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│  Node-Level Storage (All Nodes)                                             │
+│  ├── microSD card (optional per node)                                       │
+│  ├── Internal flash (metadata, logs)                                        │
+│  └── Purpose: Immediate capture, local retention                            │
+│                                                                              │
+│  Belt Node Aggregation Layer                                                │
+│  ├── microSD card (primary, up to 2 TB)                                     │
+│  ├── eMMC/NVMe (Linux SoM variants)                                         │
+│  ├── Purpose: Central recording repository, index, retention management     │
+│  └── Integrity chain for all aggregated recordings                          │
+│                                                                              │
+│  Network Storage (Optional)                                                 │
+│  ├── NAS via WiFi                                                           │
+│  ├── Cloud backup (user-configured, opt-in)                                 │
+│  └── Purpose: Long-term archive, redundancy                                 │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
 
-### 13.2 Recording Management
+### 13.2 Storage Options by Variant
+
+| Variant | Primary Storage | Secondary Storage | Capacity |
+|---------|----------------|-------------------|-----------|
+| A (MCU) | microSD (SPI) | Internal flash | SD up to 2 TB, flash 1-2 MB |
+| B (Linux SoM) | microSD (SDIO) | eMMC 8-32 GB | SD up to 2 TB |
+| C (High-perf) | NVMe SSD | eMMC | SSD up to 2 TB |
+| D (ESP32) | microSD (SPI) | Internal flash | SD up to 2 TB |
+| E (Hot-swap) | microSD (SDIO) | eMMC | SD up to 2 TB |
+
+### 13.3 Recording Management
 
 The belt node aggregates recordings from all nodes:
-- Receives `RecordingAvailable` BAN events from nodes
-- Indexes all recordings in local database
-- Serves recordings via API to companion app
-- Enforces retention policy
-- Generates legal export packages with integrity chain
 
-### 13.3 Storage Configuration
+**Recording lifecycle:**
+1. Node captures data per configuration
+2. Node sends `RecordingAvailable` BAN event to belt
+3. Belt indexes recording in local database
+4. Belt enforces retention policy
+5. Belt serves recordings via API
+6. Belt generates legal export packages on request
+
+**Integrity chain:**
+- SHA-256 hash computed on recording completion
+- Hash stored in manifest alongside recording
+- Cryptographic signature on manifest
+- Chain hash links sequential recordings
+
+### 13.4 Storage Configuration
 
 ```toml
 [storage]
-primary = "sd_card"                # "sd_card" | "internal" | "usb"
+primary = "sd_card"                # "sd_card" | "internal" | "nvme" | "usb"
 retention_days = 30                # 0 = keep forever
 max_storage_mb = 0                 # 0 = unlimited
 auto_export = false                # Auto-export to network storage
-integrity_chain = true             # Include cryptographic chain in all recordings
+export_target = ""                 # Network path for auto-export
+integrity_chain = true             # Include cryptographic chain
+
+[storage.retention_policy]
+default_days = 30
+alert_recordings_days = 90         # Longer retention for alerts
+fall_detection_days = 365          # Longest retention for falls
+evidence_recordings_days = 0       # Evidence recordings kept forever
+
+[storage.cleanup]
+schedule = "daily"                 # "daily" | "weekly" | "manual"
+delete_older_than_retention = true
+delete_low_confidence = false      # Keep low-confidence detections
+archive_before_delete = false      # Archive to network before deletion
 ```
 
 ---
@@ -893,12 +960,13 @@ integrity_chain = true             # Include cryptographic chain in all recordin
 The Belt Node does **not** carry an identification sensor:
 - No camera
 - No biometric sensor
-- No hardware switch for identification purposes
+- No hardware power switch for identification purposes
 
-**Reason:** The belt node is the compute and network hub. Identification is the role of the Pendant Node (user-configured). Separating identification from the central hub:
-- Maintains a clear separation of concerns
-- Prevents the most critical node from having privacy-sensitive components
-- Allows users to choose identification capability independently of compute capability
+**Reasoning:**
+- The belt node is the compute and network hub
+- Identification is the role of the Pendant Node (user-configured)
+- Separation of concerns: compute/network hub ≠ privacy-sensitive component
+- Users can choose identification capability independently of compute capability
 
 ---
 
@@ -911,7 +979,7 @@ The Belt Node does **not** carry an identification sensor:
 - **Weight:** 100-150 g (without extended battery)
 - **Aesthetic:** Brushed aluminum or titanium, professional appearance
 - **Limitations:** Limited internal volume, thermal constraints
-- **Variants:** A, D (MCU-class)
+- **Suitable variants:** A, D (MCU-class)
 
 ### 15.2 Rear Belt Pack
 
@@ -919,7 +987,7 @@ The Belt Node does **not** carry an identification sensor:
 - **Mounting:** Clips to belt at rear hip
 - **Weight:** 150-300 g including battery
 - **Advantages:** More internal volume, better thermal dissipation, larger battery
-- **Variants:** B, C (Linux SoM)
+- **Suitable variants:** B, C (Linux SoM)
 
 ### 15.3 Extended Belt Pack (Variant E)
 
@@ -927,57 +995,95 @@ The Belt Node does **not** carry an identification sensor:
 - **Mounting:** Belt pack style
 - **Weight:** 200-400 g including dual batteries
 - **Advantages:** Hot-swap batteries, maximum runtime, active cooling option
-- **Variants:** E only
+- **Suitable variants:** E only
 
 ### 15.4 Charging
 
-| Variant | Charging Method | Charge Time |
-|---------|-----------------|-------------|
-| A, D | USB-C (5V/2A) | 2-3 hours |
-| B, C | USB-C PD (9V/2A) | 2-3 hours |
-| E | USB-C PD (9V/3A) | 1-2 hours per battery |
+| Variant | Charging Method | Input | Charge Time |
+|---------|-----------------|-------|-------------|
+| A, D | USB-C | 5V/2A | 2-3 hours |
+| B, C | USB-C PD | 9V/2A | 2-3 hours |
+| E | USB-C PD | 9V/3A | 1-2 hours per battery |
 
 ### 15.5 Antenna Placement
 
-- Cellular/WiFi antennas on enclosure exterior (U.FL connectors to external antennas)
-- BLE/UWB antennas on PCB interior (facing body)
-- Dual BLE antennas for diversity (left and right sides)
-- Antenna connectors accessible for replacement/upgrade
+- **Cellular/WiFi antennas:** Enclosure exterior via U.FL connectors
+- **BLE antennas:** PCB interior (facing body)
+- **Dual BLE antennas:** Left and right sides for diversity
+- **Antenna connectors:** Accessible for replacement/upgrade
+
+### 15.6 Weather Protection
+
+| Variant | Rating | Notes |
+|---------|--------|-------|
+| Buckle style | IP54 | Splash resistant |
+| Belt pack style | IP54 | Splash resistant |
+| Industrial variant | IP65 | Weather sealed (custom) |
 
 ---
 
 ## 16. Extreme Velocity Detection — Latency Optimization
 
-### 16.1 Latency Requirements
+### 16.1 Realistic Engagement Scenarios
 
-| Projectile Type | Engagement Distance | Time to Impact | Detection Budget |
-|-----------------|---------------------|----------------|------------------|
-| Rifle (850 m/s) | 3 m | 3.5 ms | < 1 ms ideal |
-| Handgun (350 m/s) | 3 m | 8.5 ms | < 2 ms ideal |
+**Critical insight:** The 3-meter rifle scenario represents point-blank range, which is extremely rare. Realistic engagement distances provide significantly more warning time.
 
-### 16.2 Latency Breakdown
+| Engagement | Weapon | Distance | Velocity | Flight Time | Warning Time* |
+|------------|--------|----------|----------|-------------|---------------|
+| Close handgun | 9mm | 5 m | 350 m/s | 14.3 ms | 11-13 ms |
+| Medium handgun | 9mm | 10 m | 350 m/s | 28.6 ms | 26-28 ms |
+| Close rifle | 5.56 | 50 m | 900 m/s | 55.6 ms | 53-55 ms |
+| Medium rifle | 5.56 | 100 m | 900 m/s | 111 ms | 108-111 ms |
+| Long rifle | 5.56 | 200 m | 900 m/s | 222 ms | 219-222 ms |
+
+*Warning time = Flight time - Detection/alert latency (~2-3 ms optimized)
+
+### 16.2 Latency Budget Breakdown
 
 | Stage | Latency | Notes |
 |-------|---------|-------|
-| Doppler detection | 10-100 µs | Hardware event |
-| Event camera trigger | < 1 ms | Fast transient detection |
+| CW Doppler detection | 50-150 µs | Hardware event, trivial compared to flight time |
+| Event camera confirmation | 100-500 µs | Direction validation |
 | MCU processing | 100-500 µs | Detection classification |
-| BLE queue (without QoS) | 0-30 ms | Depends on schedule slot |
-| BLE queue (with QoS Critical) | 0-5 ms | Preemptive transmission |
+| BLE queue (standard) | 0-30 ms | Depends on schedule slot |
+| BLE queue (QoS Critical) | 0-5 ms | Preemptive transmission |
 | BLE transmission | 1-3 ms | Packet airtime |
 | Belt reception | < 1 ms | Processing |
-| Alert decision | 100-500 µs | Classification |
 | Haptic trigger | < 1 ms | Actuator response |
+| **Total (standard BLE)** | **3-35 ms** | Acceptable for rifle at 50+ m |
+| **Total (optimized BLE)** | **2-5 ms** | Acceptable for all scenarios |
 
-### 16.3 Improvements for Extreme Velocity
+### 16.3 Latency Optimization Features
 
-| Improvement | Latency Reduction |
-|-------------|-------------------|
-| QoS = Critical preemption | 30 ms → 5 ms (worst case) |
-| Reserved slot (25-28 ms) | Guaranteed transmission opportunity |
-| Antenna diversity | Reduced retries from body shadowing |
+| Feature | Implementation | Latency Impact |
+|---------|----------------|-----------------|
+| QoS = Critical | Preempt normal traffic | 30 ms → 5 ms worst case |
+| Reserved slot | Guaranteed transmission slot | Ensures < 5 ms transmission |
+| Antenna diversity | Reduced retries from body shadowing | More reliable, fewer retries |
+| CW radar (vs FMCW) | No chirp latency | Detection in 50-150 µs |
+| Event camera | 10-100 µs latency | Fast direction confirmation |
 
-**Net effect:** Total detection-to-alert latency reliably < 10 ms.
+### 16.4 Haptic Actuator Selection
+
+**Critical insight:** Haptic onset time varies dramatically by actuator type.
+
+| Actuator Type | Onset Time | Suitable For |
+|---------------|------------|--------------|
+| ERM motor | 10-50 ms | ❌ Too slow for useful warning |
+| LRA (linear resonant) | 2-10 ms | ✅ Sufficient for rifle at 50+ m |
+| Piezo haptic | 0.5-1 ms | ✅ Excellent for all scenarios |
+
+**Recommendation:**
+- LRA sufficient for realistic rifle engagements (50+ m)
+- Piezo provides additional margin for close-range scenarios
+- Both can be populated on belt PCB; user choice
+
+```toml
+[haptic]
+type = "lra"                      # "lra" | "piezo" | "both"
+piezo_enabled = false             # Enable piezo if populated
+piezo_priority = "extreme_velocity"  # Use piezo only for critical alerts
+```
 
 ---
 
@@ -985,42 +1091,72 @@ The Belt Node does **not** carry an identification sensor:
 
 ### 17.1 All Variants — Mandatory Tests
 
-1. Power-on self-test — MCU boots, firmware CRC verified
-2. Rail verification — all power rails within ±5% of nominal
-3. BAN connectivity — ping all nodes, latency < 50 ms
-4. WiFi connectivity — associate with test AP, latency < 100 ms
-5. SD card detection — verify mount and read/write
-6. IMU verification — gravity vector reads 9.81 ± 0.5 m/s² at rest
-7. Environmental sensor — temperature, humidity read reasonable values
+| Test | Description | Acceptance Criteria |
+|------|-------------|---------------------|
+| Power-on self-test | MCU boots, firmware CRC verified | PASS |
+| Rail verification | All power rails within ±5% | 3.3V, 5.0V within spec |
+| BAN connectivity | Ping all expected nodes | Latency < 50 ms |
+| WiFi connectivity | Associate with test AP | Latency < 100 ms |
+| SD card detection | Mount and read/write | Read/write successful |
+| IMU verification | Gravity vector at rest | 9.81 ± 0.5 m/s² |
+| Environmental sensor | Temperature, humidity | Reasonable values |
+| Battery gauge | Fuel gauge accuracy | Within 5% |
 
 ### 17.2 Linux SoM Variants — Additional Tests
 
-8. Boot time — Linux boot complete within 30 seconds
-9. API server — all basic REST endpoints return 200 OK
-10. Media streaming — RTSP stream opens within 5 seconds
-11. SLAM benchmark — 1000-frame PentaTrack update < 10 ms/frame
-12. Thermal — sustained load for 1 hour, enclosure < 42°C
+| Test | Description | Acceptance Criteria |
+|------|-------------|---------------------|
+| Boot time | Linux boot complete | < 30 seconds |
+| API server | All basic REST endpoints | 200 OK |
+| Media streaming | RTSP stream open | < 5 seconds |
+| SLAM benchmark | 1000-frame PentaTrack | < 10 ms/frame |
+| Thermal load | Sustained operation | Enclosure < 42°C |
 
 ### 17.3 Cellular Module Tests (If Installed)
 
-13. SIM detection — `SIM_DET` GPIO reads card present
-14. SIM power — `SIM_VCC` within spec (1.8V or 3.0V)
-15. AT command response — `AT` returns `OK` within 5 seconds
-16. Network registration — module reports registered within 60 seconds (with live SIM)
-17. Cellular current draw — within spec during active connection
+| Test | Description | Acceptance Criteria |
+|------|-------------|---------------------|
+| SIM detection | GPIO reads card present | PASS |
+| SIM power | SIM_VCC voltage | 1.8V or 3.0V per spec |
+| AT command | `AT` response | `OK` within 5 seconds |
+| Network registration | Module status | Registered within 60 seconds |
+| Cellular current | Active draw | Within module spec |
+| Alert relay | Test alert delivery | Received at endpoint |
 
 ### 17.4 Antenna Diversity Tests
 
-18. Left antenna RSSI measurement — verify within expected range
-19. Right antenna RSSI measurement — verify within expected range
-20. Switching functionality — verify firmware switches antennas based on RSSI
-21. Diversity gain — measure RSSI improvement with body shadowing
+| Test | Description | Acceptance Criteria |
+|------|-------------|---------------------|
+| Left antenna RSSI | Signal strength measurement | Within expected range |
+| Right antenna RSSI | Signal strength measurement | Within expected range |
+| Switching logic | Firmware antenna selection | Switches based on RSSI |
+| Diversity gain | RSSI improvement with body shadowing | Measurable improvement |
 
 ### 17.5 Hot-Swap Tests (Variant E Only)
 
-22. Battery swap while running — system continues operation on remaining battery
-23. Swap detection — firmware correctly reports which bay is active
-24. Charge while operating — both bays charge while system runs
+| Test | Description | Acceptance Criteria |
+|------|-------------|---------------------|
+| Battery swap during operation | Swap one battery while running | System continues |
+| Swap detection | Firmware reports active bay | Correct bay reported |
+| Charge while operating | Both bays charge | Charging confirmed |
+
+### 17.6 Recording Manager Tests
+
+| Test | Description | Acceptance Criteria |
+|------|-------------|---------------------|
+| Recording aggregation | `RecordingAvailable` events indexed | All events indexed |
+| Retention enforcement | Old recordings deleted | Per policy |
+| Legal export | ZIP with integrity manifest | SHA-256 verified |
+| API access | Recordings served via API | 200 OK with data |
+
+### 17.7 Extreme Velocity Detection Tests
+
+| Test | Description | Acceptance Criteria |
+|------|-------------|---------------------|
+| CW radar detection | Fast object detection | Latency < 200 µs |
+| Event camera trigger | Streak detection | Latency < 500 µs |
+| QoS Critical transmission | BLE preemptive send | Latency < 5 ms |
+| Direction estimation | Angle accuracy | ± 15° |
 
 ---
 
@@ -1038,27 +1174,41 @@ belt_node/
 │   ├── belt_node_cm4.kicad_sch
 │   ├── belt_node_cm4.kicad_pcb
 │   └── gerbers/
-├── variant_c_imx8/
+├── variant_c_high_perf/
 │   ├── belt_node_imx8.kicad_pro
+│   ├── belt_node_imx8.kicad_sch
+│   ├── belt_node_imx8.kicad_pcb
 │   └── gerbers/
 ├── variant_d_esp32/
 │   ├── belt_node_esp32.kicad_pro
+│   ├── belt_node_esp32.kicad_sch
+│   ├── belt_node_esp32.kicad_pcb
 │   └── gerbers/
 ├── variant_e_hotswap/
 │   ├── belt_node_hotswap.kicad_pro
+│   ├── belt_node_hotswap.kicad_sch
+│   ├── belt_node_hotswap.kicad_pcb
 │   └── gerbers/
 ├── bom/
 │   ├── belt_node_bom_mcu.csv
 │   ├── belt_node_bom_linux.csv
+│   ├── belt_node_bom_high_perf.csv
+│   ├── belt_node_bom_esp32.csv
 │   └── belt_node_bom_hotswap.csv
 ├── cad/
-│   └── belt_enclosure.step
+│   ├── belt_buckle.step
+│   ├── belt_pack_standard.step
+│   ├── belt_pack_extended.step
+│   └── antenna_placement.dxf
+├── test_jig/
+│   ├── belt_test_jig.kicad_pro
+│   └── test_procedure.md
 └── README.md
 ```
 
 ---
 
-## 19. Configuration Summary
+## 19. Complete Configuration Reference
 
 ```toml
 # sentinel-wear.toml — Belt Node Configuration
@@ -1066,48 +1216,71 @@ belt_node/
 [identity]
 node_type = "belt"
 node_id = "belt_primary"
+role = "primary_hub"
+
+# =============================================================================
+# COMPUTE VARIANT
+# =============================================================================
 
 [compute]
 variant = "linux_som"              # "mcu" | "linux_som" | "high_perf" | "esp32"
 slam_enabled = true
-slam_backend = "orb_slam3"          # "orb_slam3" | "lio_sam"
+slam_backend = "orb_slam3"          # "orb_slam3" | "lio_sam" | "fast_lio"
+slam_update_rate_hz = 10           # SLAM processing frequency
 
-[connectivity]
-# WiFi configuration
-wifi_enabled = true
-wifi_prefer_5ghz = true
+# =============================================================================
+# CONNECTIVITY — EXTERNAL (BELT NODE ONLY)
+# =============================================================================
 
-# Cellular configuration
+# WiFi (Primary external path)
+[connectivity.wifi]
+enabled = true
+prefer_5ghz = true                 # Strongly recommended for RF coexistence
+ssid = ""                           # Set at runtime for security
+password = ""                       # Set at runtime for security
+fallback_to_ble = true              # Use BLE direct if WiFi unavailable
+
+# Cellular (Secondary external path)
 [connectivity.cellular]
 enabled = false
-sim_type = "nano_sim"
-apn = ""
+sim_type = "nano_sim"              # "nano_sim" | "esim"
+apn = "your.carrier.apn"
 fallback_to_wifi = true
 always_on_cellular = false
 alert_via_cellular = true
 stream_via_cellular = false
+emergency_contact = ""
+emergency_contact_trigger = "manual"   # "manual" | "fall_detected" | "critical_alert"
 
-# BAN configuration
-[connectivity.ban]
+# BLE direct (Local fallback)
+[connectivity.bluetooth]
+ble_direct_enabled = true
+ble_advertising_name = "sentinel-belt"
+
+# =============================================================================
+# BODY-AREA NETWORK (BAN)
+# =============================================================================
+
+[ban]
 primary = "ble"
 ble_connection_interval_ms = 30
 uwb_enabled = false
 uwb_role = "timing_and_ranging"
 
-# BLE scheduling
+# BLE Scheduling
 [ban.ble_scheduling]
 default_connection_interval_ms = 30
-anklet_interval_ms = 15
+anklet_interval_ms = 15              # Higher priority for gait detection
 pendant_interval_ms = 30
 bracelet_interval_ms = 50
-eyewear_interval_ms = 100
+eyewear_interval_ms = 100            # Optional node
 sleep_interval_ms = 500
-reserved_slot_start_ms = 25
+reserved_slot_start_ms = 25          # Reserved for critical alerts
 reserved_slot_end_ms = 28
 
-# Dynamic scheduling
+# Dynamic Scheduling
 [ban.scheduling]
-mode = "dynamic"
+mode = "dynamic"                     # "static" | "dynamic"
 
 [ban.scheduling.dynamic]
 walking_anklet_priority_boost = 1.5
@@ -1115,7 +1288,7 @@ threat_pendant_priority_boost = 2.0
 idle_interval_multiplier = 2.0
 streaming_shift_to_uwb = true
 
-# QoS classes
+# QoS Classes
 [ban.qos]
 classes = ["critical", "high", "medium", "low"]
 
@@ -1135,31 +1308,91 @@ traffic_types = ["presence_detection", "tracking_update", "identification"]
 
 [ban.qos.low]
 max_latency_ms = 500
-traffic_types = ["battery_status", "health_telemetry", "diagnostics"]
+traffic_types = ["battery_status", "health_telemetry"]
 
-# Antenna diversity
+# Antenna Diversity
 [ban.antenna_diversity]
 enabled = true
 antenna_count = 2
-selection_mode = "rssi"
+selection_mode = "rssi"              # "rssi" | "packet_loss" | "manual"
 switch_threshold_db = 5
 hysteresis_db = 2
 preferred_antenna = "auto"
+scan_interval_ms = 100
 
-# UWB
+# UWB Configuration
 [ban.uwb]
 enabled = false
-role = "timing_and_ranging"
-nodes_with_uwb = ["pendant"]
+role = "timing_and_ranging"          # "timing_only" | "timing_and_ranging" | "full_bandwidth"
+nodes_with_uwb = ["pendant"]          # Which nodes have UWB
 streaming_fallback = false
 max_sustained_mbps = 5
 
-# RF coexistence
+# =============================================================================
+# RF COEXISTENCE
+# =============================================================================
+
 [rf_coexistence]
 wifi_prefer_5ghz = true
 ble_wifi_timeshare = false
+ble_gap_during_wifi_ms = 5
 
-# Power management
+# =============================================================================
+# SENSORS
+# =============================================================================
+
+# IMU (Torso Reference)
+[sensors.imu]
+model = "ICM-42688-P"
+sample_rate_hz = 200
+full_scale_g = 16
+low_noise_mode = true
+
+# mmWave Radar
+[sensors.radar]
+model = "IWR6843AOP"
+mode = "standard"                    # "standard" | "extended_doppler"
+
+[sensors.radar.extended_doppler]
+enabled = false                      # Enable for extreme velocity detection
+max_velocity_ms = 300
+range_resolution_m = 0.5
+velocity_resolution_ms = 150
+
+# Environmental
+[sensors.environmental]
+enabled = true
+model = "BME688"
+sample_interval_s = 60
+
+# =============================================================================
+# STORAGE
+# =============================================================================
+
+[storage]
+primary = "sd_card"                  # "sd_card" | "internal" | "nvme" | "usb"
+retention_days = 30
+max_storage_mb = 0                   # 0 = unlimited
+auto_export = false
+export_target = ""
+integrity_chain = true
+
+[storage.retention_policy]
+default_days = 30
+alert_recordings_days = 90
+fall_detection_days = 365
+evidence_recordings_days = 0         # Keep forever
+
+[storage.cleanup]
+schedule = "daily"
+delete_older_than_retention = true
+delete_low_confidence = false
+archive_before_delete = false
+
+# =============================================================================
+# POWER MANAGEMENT
+# =============================================================================
+
 [power]
 battery_capacity_mah = 5000
 low_battery_threshold_percent = 20
@@ -1169,40 +1402,114 @@ critical_battery_threshold_percent = 10
 enabled = true
 scale_slam_on_low_battery = true
 scale_streaming_on_low_battery = true
+disable_slam_on_critical = true
+disable_streaming_on_critical = true
 
 [power.thermal]
 max_enclosure_temp_c = 45
 throttle_slam_above_temp_c = 40
 disable_slam_above_temp_c = 45
+monitor_ntc = true
 
-# Sensors
-[sensors.imu]
-model = "ICM-42688-P"
-sample_rate_hz = 200
-full_scale_g = 16
-low_noise_mode = true
+# =============================================================================
+# HAPTIC
+# =============================================================================
 
-[sensors.radar]
-model = "IWR6843"
-mode = "standard"
+[haptic]
+type = "lra"                         # "lra" | "piezo" | "both"
+piezo_enabled = false
+piezo_priority = "extreme_velocity"   # Use piezo only for critical alerts
+lra_onset_ms = 5
 
-[sensors.radar.extended_doppler]
-enabled = false
-max_velocity_ms = 300
-range_resolution_m = 0.5
+[haptic.directional]
+enabled = true
+actuator_count = 4
+alert_mode = "nearest_to_threat"
+intensity_gradient = true
 
-# Storage
-[storage]
-primary = "sd_card"
-retention_days = 30
-max_storage_mb = 0
-integrity_chain = true
+# =============================================================================
+# APP SERVER
+# =============================================================================
 
-# App server
 [app]
 enabled = true
+bind_address = "0.0.0.0"
 api_port = 8080
 media_port = 9090
+panorama_port = 9091
 enable_remote_access = false
 remote_access_token = ""
+
+# =============================================================================
+# EXTREME VELOCITY DETECTION
+# =============================================================================
+
+[extreme_velocity]
+enabled = false
+mode = "production"                  # "disabled" | "research" | "production"
+
+[extreme_velocity.tier1]
+radar_mode = "continuous_wave"
+velocity_threshold_ms = 50
+detection_latency_target_us = 150
+local_haptic_trigger = true
+haptic_type = "lra"
+
+[extreme_velocity.tier1.cw_radar]
+fft_size = 64
+fft_window_us = 32
+adc_sample_rate_hz = 2000000
+if_gain_db = 40
+
+[extreme_velocity.tier1.event_camera]
+enabled = true
+streak_threshold_per_ms = 500
+min_streak_length_px = 20
+
+[extreme_velocity.tier2]
+enabled = true
+direction_accuracy_deg = 15
+latency_target_ms = 2
+
+[extreme_velocity.tier3]
+enabled = true
+fmcw_burst = true
+record_evidence = true
+latency_target_ms = 50
+
+[extreme_velocity.ble]
+qos_class = "critical"
+reserved_slot = true
+
+[extreme_velocity.alert]
+directional = true
+nodes = ["pendant", "bracelet_left", "bracelet_right"]
 ```
+
+---
+
+## 20. Summary
+
+The Belt Node is the architectural cornerstone of SENTINEL-WEAR:
+
+**Primary responsibilities:**
+- **Sole external gateway** — WiFi, cellular, and BLE direct to companion app
+- **BAN coordinator** — Time master, scheduler, QoS manager, antenna diversity
+- **Compute hub** — Fusion, PentaTrack, SLAM, API server
+- **Storage aggregation** — Recording manager, retention, legal export
+- **Torso reference** — Body-frame origin for all tracking
+
+**Key architectural decisions:**
+- **Single BLE radio with antenna diversity** (not multi-radio BLE)
+- **QoS classes** for traffic prioritization
+- **Reserved slot** for critical alerts including extreme velocity detection
+- **WiFi prefers 5 GHz** for RF coexistence
+- **Hot-swap batteries** for extended runtime (Variant E)
+- **No identification sensor** on belt (separation of concerns)
+
+**Latency performance:**
+- Standard BLE: 3-35 ms (sufficient for rifle at 50+ m)
+- Optimized BLE: 2-5 ms (sufficient for all scenarios)
+- CW radar detection: 50-150 µs (trivial compared to flight time)
+
+**This is the only node with external network connectivity. All other nodes communicate exclusively via BAN to the belt.**
