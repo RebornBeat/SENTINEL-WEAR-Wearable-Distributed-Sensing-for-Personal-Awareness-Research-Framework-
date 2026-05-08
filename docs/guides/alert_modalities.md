@@ -1,6 +1,6 @@
 # Alert Modalities — SENTINEL-WEAR
 
-**Version:** 0.2 | **Status:** Research Reference Design
+**Version:** 0.3 | **Status:** Research Reference Design
 
 ---
 
@@ -38,13 +38,21 @@ SENTINEL-WEAR alerts are designed to be ambient — felt rather than heard, prov
 │  Alert Router (Belt Node)                                                    │
 │       │                                                                      │
 │       ├── Haptic Route → Target node(s) based on direction                  │
-│       │   └── Pattern selected based on class + urgency                     │
+│       │   ├── Pattern selected based on class + urgency                     │
+│       │   └── Intensity scaled by proximity and urgency                     │
 │       │                                                                      │
 │       ├── Audio Route (if enabled) → Bone conduction earpiece               │
 │       │                                                                      │
 │       ├── App Route (if connected) → WebSocket to companion app             │
 │       │                                                                      │
 │       └── Cellular Route (if remote) → Push notification                   │
+│                                                                              │
+│  QoS Priority Routing                                                        │
+│       │                                                                      │
+│       ├── Critical (QoS=1): Preempt all other traffic                       │
+│       ├── High (QoS=2): Priority queue                                      │
+│       ├── Medium (QoS=3): Normal scheduling                                 │
+│       └── Low (QoS=4): Background transmission                             │
 │                                                                              │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -165,24 +173,37 @@ active_intensity = 1.0
 sleep_mode_intensity = 0.25
 ```
 
-### 4.4 Haptic Hardware
+### 4.4 Haptic Hardware Types
 
-**Actuator type:** LRA (Linear Resonant Actuator)
+SENTINEL-WEAR supports multiple haptic actuator types, each with different characteristics:
+
+| Actuator Type | Onset Time | Peak Power | Use Case |
+|---------------|------------|------------|----------|
+| **LRA (Linear Resonant Actuator)** | 2-10 ms | 50-100 mA | Standard haptic, sufficient for most scenarios |
+| **ERM (Eccentric Rotating Mass)** | 10-50 ms | 80-150 mA | Legacy, not recommended |
+| **Piezo Haptic** | 0.1-1.0 ms | 20-50 mA (high voltage) | Fastest onset, recommended for extreme velocity |
+
+**Key insight from realistic engagement analysis:**
+
+| Scenario | Projectile Flight Time | LRA Alert Latency | Warning Time with LRA |
+|----------|------------------------|-------------------|----------------------|
+| Rifle at 50 m | 58.8 ms | 2-10 ms | **48.8-56.8 ms** ✅ |
+| Rifle at 100 m | 117.6 ms | 2-10 ms | **107.6-115.6 ms** ✅ |
+| Handgun at 10 m | 28.6 ms | 2-10 ms | **18.6-26.6 ms** ✅ |
+| Handgun at 3 m | 8.5 ms | 2-10 ms | **0-6.5 ms** ⚠️ |
+
+**Conclusion:** LRA haptics are **sufficient for realistic rifle engagements (50+ meters)** and most handgun scenarios. Piezo haptics are a **nice-to-have enhancement** for close-range scenarios and maximum margin, but **not mandatory**.
+
+**Recommendation:** All belt nodes should support both LRA (standard) and optional piezo haptics (enhancement). Users choose based on their risk profile.
+
+### 4.5 Driver IC
 
 | Specification | Value |
 |---------------|-------|
-| Type | LRA (preferred) or ERM |
-| Typical resonance | 150-200 Hz |
-| Voltage | 3.0-3.3V |
-| Driver IC | TI DRV2605L (I2C, built-in waveform library) |
-| Response time | < 50 ms to full vibration |
-| Power (active) | 50-100 mA during pulse |
-
-**Driver capabilities:**
-- Built-in waveform library (over 100 patterns)
-- Closed-loop back-EMF feedback
-- Automatic resonance tracking
-- Real-time amplitude control
+| LRA Driver | TI DRV2605L (I2C, built-in waveform library) |
+| Piezo Driver | DRV2667 or equivalent (boost converter for high voltage) |
+| Interface | I2C (configuration) + GPIO/PWM (drive) |
+| Features | Closed-loop back-EMF feedback, automatic resonance tracking, real-time amplitude control |
 
 ---
 
@@ -259,7 +280,31 @@ prediction_ahead_seconds = 0.5        # Predict where object will be, not where 
 
 ## 6. Extreme Velocity Detection Alerts
 
-### 6.1 The FastObjectDetected Alert Class
+### 6.1 Detection Tier Architecture
+
+Extreme velocity detection operates in three tiers with different latency requirements:
+
+**Tier 1 — Reflex Trigger (~50-150 µs):**
+- CW radar detects velocity > 50 m/s
+- Local MCU decision, no fusion required
+- Immediate local haptic trigger
+- Starts Tier 2 processing
+
+**Tier 2 — Direction Validation (~100-500 µs after Tier 1):**
+- Event camera streak analysis
+- Angle estimation from trajectory
+- Fusion with radar velocity
+- Routes alert directionally
+
+**Tier 3 — Characterization (~5-50 ms):**
+- FMCW burst for range
+- Evidence capture to SD card
+- Network transmission
+- Full logging with integrity chain
+
+**Key insight:** These tiers operate in parallel and independently. Tier 1 fires the haptic alert before Tier 3 even begins.
+
+### 6.2 The FastObjectDetected Alert Class
 
 This is the highest-priority alert in the system, triggered by extreme velocity detection (projectiles, debris, fragments).
 
@@ -276,11 +321,11 @@ Alert routed with QoS = Critical
 Belt receives alert
     ↓ (within 1-2 ms BLE transmission)
 Haptic fires on pendant
-    ↓ (within < 1 ms)
-Total latency: < 5 ms (target)
+    ↓ (within < 1 ms for piezo, 2-10 ms for LRA)
+Total latency: < 5 ms (optimized) to < 10 ms (standard LRA)
 ```
 
-### 6.2 Pattern for FastObjectDetected
+### 6.3 Pattern for FastObjectDetected
 
 **Pattern:** Rapid pulses — 50 ms on, 50 ms off, repeated 5 times
 
@@ -295,7 +340,39 @@ Total latency: < 5 ms (target)
 - Center of body frame
 - User's attention naturally drawn to torso
 
-### 6.3 Context Information
+### 6.4 Realistic Engagement Scenario Analysis
+
+**The critical insight:** At realistic rifle engagement distances (50-300 meters), the projectile flight time vastly exceeds alert latency.
+
+| Scenario | Projectile Velocity | Flight Time | Alert Latency (Standard LRA) | Warning Time Available |
+|----------|---------------------|-------------|-----------------------------|------------------------|
+| Rifle at 50 m | 850 m/s | 58.8 ms | ~5-10 ms | **49-54 ms** ✅ |
+| Rifle at 100 m | 850 m/s | 117.6 ms | ~5-10 ms | **108-113 ms** ✅ |
+| Rifle at 200 m | 850 m/s | 235.3 ms | ~5-10 ms | **225-230 ms** ✅ |
+| Handgun at 10 m | 350 m/s | 28.6 ms | ~5-10 ms | **19-24 ms** ✅ |
+| Handgun at 3 m | 350 m/s | 8.5 ms | ~5-10 ms | **0-4 ms** ⚠️ |
+
+**Human reaction time for simple response:** ~200 ms
+
+**At 100 meters rifle:** The wearer has **108-113 ms** of warning — enough for multiple haptic pulses, visual alert processing, and beginning a protective response.
+
+**At 200 meters rifle:** The wearer has **225-230 ms** — more than human reaction time.
+
+**At 3 meters handgun:** Warning time is 0-4 ms — physically constrained, awareness-only.
+
+### 6.5 Detection Range vs Alert Latency Priority
+
+**Key realization:** For realistic scenarios, detection range is more important than alert latency.
+
+| Configuration | Detection Range | Rifle Flight Time | Warning Time |
+|---------------|-----------------|-------------------|--------------|
+| Latency-optimized | 50 m | 58.8 ms | 48-54 ms |
+| Range-optimized | 150 m | 176.5 ms | 166-172 ms |
+| Balanced | 100 m | 117.6 ms | 107-113 ms |
+
+**Recommendation:** Configure radar for maximum detection range rather than minimum latency. The 2-5 ms latency savings are negligible compared to the 50-100 ms gained by detecting earlier.
+
+### 6.6 Context Information
 
 The FastObjectDetected alert includes trajectory context when available:
 
@@ -318,24 +395,14 @@ The FastObjectDetected alert includes trajectory context when available:
 }
 ```
 
-### 6.4 User Response Time
-
-| Projectile Type | Engagement Distance | Time to Impact | Alert Latency (target) | Response Time Available |
-|-----------------|---------------------|----------------|------------------------|-------------------------|
-| Rifle (850 m/s) | 3 m | 3.5 ms | < 5 ms | 0-2 ms (very limited) |
-| Rifle (850 m/s) | 10 m | 11.8 ms | < 5 ms | ~7 ms |
-| Handgun (350 m/s) | 3 m | 8.5 ms | < 5 ms | ~3-4 ms |
-| Handgun (350 m/s) | 10 m | 28.6 ms | < 5 ms | ~24 ms |
-
-**Key insight:** At very close range (3 m), response time is extremely limited. The alert provides awareness but may not enable avoidance. At longer ranges, the wearer has more time to react.
-
-### 6.5 Configuration
+### 6.7 Configuration
 
 ```toml
 [alerts.extreme_velocity]
 enabled = true
 min_velocity_ms = 50                 # Ignore objects below this velocity
 max_detection_distance_m = 10        # Only alert for nearby threats
+detection_optimization = "range"     # "range" | "latency" | "balanced"
 haptic_pattern = "rapid_pulse_5"
 haptic_node = "pendant"
 secondary_node = "eyewear"
@@ -956,6 +1023,8 @@ prediction_ahead_seconds = 0.5
 default_intensity = 1.0
 quiet_hours_intensity = 0.5
 adaptive_intensity = true
+piezo_enabled = false                # Optional enhancement
+piezo_for_critical_only = true
 
 [alerts.audio]
 enabled = false
@@ -967,6 +1036,7 @@ bearing_encoding = true
 enabled = true
 min_velocity_ms = 50
 max_detection_distance_m = 10
+detection_optimization = "range"
 haptic_pattern = "rapid_pulse_5"
 haptic_node = "pendant"
 include_trajectory = true
