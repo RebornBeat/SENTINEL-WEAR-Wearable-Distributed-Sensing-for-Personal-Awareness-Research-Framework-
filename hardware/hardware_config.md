@@ -2,8 +2,6 @@
 
 **Version:** 0.3 | **Status:** Research Reference Design
 
----
-
 ## 1. Philosophy: No Artificial Limits
 
 This document specifies the hardware interfaces, power architecture, connectivity hierarchy, and configuration standards for SENTINEL-WEAR sensing nodes. It is a **reference design**, not a constraint specification.
@@ -51,6 +49,28 @@ This document specifies the hardware interfaces, power architecture, connectivit
 | **Antenna** | Requires significant clearance | Small PCB antenna | Moderate clearance |
 
 **Conclusion:** WiFi on jewelry-form-factor nodes destroys the form factor through power/thermal/size requirements. BLE and UWB are the only viable BAN technologies for jewelry-scale wearables. All external connectivity (WiFi, Cellular) is concentrated at the belt node where larger form factor and battery are acceptable.
+
+### Why NOT Multi-Radio BLE?
+
+**Multi-radio BLE** (multiple BLE transceivers on the belt) sounds attractive for parallel connections, but causes more problems than it solves:
+
+| Problem | Description |
+|---------|-------------|
+| **Self-interference** | Multiple transmitters in close proximity cause receiver desensitization |
+| **RF coupling** | Antennas centimeters apart couple strongly, degrading sensitivity |
+| **Increased power** | Multiple radios = multiple power draws |
+| **Firmware complexity** | Coordinated frequency hopping, scheduling across radios |
+| **Debugging difficulty** | Multi-radio RF problems are notoriously hard to diagnose |
+
+**When multi-radio BLE IS appropriate:**
+- Industrial sensor mesh (factory floor scale)
+- Hospital patient monitoring (ward scale)
+- Smart building (floor-wide deployment)
+- Node count > 20-30
+
+**NOT appropriate for SENTINEL-WEAR:** Single-person wearable with 4-6 nodes — the complexity exceeds benefits.
+
+**The correct solution is antenna diversity** (see Section 7).
 
 ---
 
@@ -343,8 +363,6 @@ max_sustained_mbps = 5          # Conservative limit for thermal management
 nodes_with_uwb = ["pendant", "anklet_left", "anklet_right"]  # Which nodes have UWB populated
 ```
 
----
-
 ## 6. RF Coexistence
 
 ### 6.1 Frequency Bands in Use
@@ -365,6 +383,7 @@ nodes_with_uwb = ["pendant", "anklet_left", "anklet_right"]  # Which nodes have 
 - Most modern routers support 5 GHz
 - BLE operates at 2.4 GHz — no conflict
 - Strongly recommended configuration
+- Eliminates the primary BLE/WiFi interference path
 
 **Strategy 2: Antenna Separation on Belt Node**
 ```
@@ -389,19 +408,34 @@ Belt Node Enclosure (Top View)
 - Cellular/WiFi antennas on exterior of belt (better propagation, away from body)
 - BLE antennas on interior (body is the communication medium for BAN)
 - Physical separation between 2.4 GHz antennas reduces coupling
+- Minimum recommended separation: 30-50 mm between any two 2.4 GHz antennas
 
 **Strategy 3: Time-Division Multiplexing (When 2.4 GHz WiFi Required)**
 - BLE connection events scheduled during WiFi idle periods
 - BLE gap during WiFi transmission
 - Requires coordination between WiFi and BLE firmware
+- Only needed when 5 GHz WiFi unavailable
 
-### 6.3 Configuration
+### 6.3 RF Isolation Requirements
+
+For the belt node with multiple radios:
+
+| Radio Pair | Isolation Target | Method |
+|------------|------------------|--------|
+| BLE ↔ WiFi (2.4 GHz) | > 20 dB | Antenna separation, frequency coordination |
+| BLE ↔ Cellular (LTE Band 7) | > 15 dB | Antenna separation, filtering |
+| WiFi ↔ Cellular | > 25 dB | Antenna separation, shielding if needed |
+| UWB ↔ All | > 30 dB | Separate band, natural isolation |
+| mmWave ↔ All | > 40 dB | Separate band (60 GHz), natural isolation |
+
+### 6.4 Configuration
 
 ```toml
 [rf_coexistence]
-wifi_prefer_5ghz = true        # Strongly recommended
-ble_wifi_timeshare = false     # Set true only if 2.4 GHz WiFi required
-ble_gap_during_wifi_ms = 5     # Gap between BLE and WiFi if sharing
+wifi_prefer_5ghz = true          # Strongly recommended
+ble_wifi_timeshare = false       # Set true only if 2.4 GHz WiFi required
+ble_gap_during_wifi_ms = 5       # Gap between BLE and WiFi if sharing
+antenna_separation_mm = 40       # Minimum separation for belt node antennas
 ```
 
 ---
@@ -420,8 +454,8 @@ The human body is a significant RF absorber at 2.4 GHz:
 Node on right side of body
     ↓ (body blocks signal)
 Single antenna on left side of belt
-    ↓ (poor signal)
-High packet loss, retries, latency
+    ↓ (poor signal: -80 dBm)
+High packet loss, retries, variable latency
 ```
 
 **Dual antenna solution:**
@@ -433,95 +467,144 @@ Right antenna: good signal (-60 dBm)
     ↓
 Radio switches to right antenna
     ↓
-Reliable communication
+Reliable communication (packet loss < 1%)
 ```
 
 ### 7.2 Solution: Antenna Diversity (NOT Multi-Radio)
 
 **Key distinction:**
-- **Multi-radio BLE** = Multiple BLE transceivers (NOT recommended — causes self-interference)
-- **Antenna diversity** = ONE BLE radio + multiple antennas (RECOMMENDED)
+
+| Approach | Description | Self-Interference | Recommendation |
+|----------|-------------|-------------------|-----------------|
+| Multi-radio BLE | Multiple BLE transceivers | High — receiver desense | ❌ NOT recommended |
+| Antenna diversity | ONE BLE radio + multiple antennas | None — only one transmitter | ✅ RECOMMENDED |
 
 **Antenna diversity implementation:**
-- Single BLE transceiver
-- SPDT or DPDT RF antenna switch
+- Single BLE transceiver (nRF5340 or equivalent)
+- SPDT or DPDT RF antenna switch (Skyworks SKY13330, Analog ADG918, or similar)
 - Two antennas physically separated on the belt
 - MCU GPIO controls antenna selection
 - Firmware selects best antenna based on RSSI or packet loss
+- Switch time: < 1 microsecond
 
-**Benefits:**
-- Improved reliability in body-shadowing conditions
-- Lower packet loss
-- More deterministic latency
-- Critical for extreme velocity detection reliability
-- NO self-interference (only one radio active at a time)
+### 7.3 Benefits of Antenna Diversity
 
-### 7.3 Implementation
+| Benefit | Impact |
+|---------|--------|
+| Improved reliability | Reduces packet loss from body shadowing |
+| Lower retries | More deterministic latency |
+| Better coverage | Works regardless of body orientation |
+| No self-interference | Only one transmitter active at a time |
+| Critical for extreme velocity | Ensures detection messages arrive reliably |
 
-| Component | Specification |
-|-----------|---------------|
-| BLE radio | Single nRF5340 or equivalent |
-| Antenna switch | SPDT RF switch (Skyworks SKY13330, Analog ADG918, or similar) |
-| Switch time | < 1 microsecond |
-| Antennas | 2× PCB trace or chip antennas, physically separated on belt |
-| Selection algorithm | RSSI-based or packet-loss-triggered |
+### 7.4 Antenna Placement on Belt
 
-**Antenna placement on belt:**
 ```
 Belt Node Interior Surface (Facing Body)
 ┌─────────────────────────────────────────────────────────────────┐
 │                                                                 │
 │   [BLE Antenna LEFT]                         [BLE Antenna RIGHT]│
 │   (Positioned toward wearer's left)           (toward right)     │
+│        │                                           │              │
+│        └──────────────► [RF Switch] ◄──────────────┘              │
+│                           │                                      │
+│                      [BLE Radio]                                  │
 │                                                                 │
-│                     [RF Switch]                                 │
-│                          │                                      │
-│                     [BLE Radio]                                  │
+│   Physical separation: 60-80 mm recommended                      │
+│   Both antennas on interior (body-facing) surface                │
 │                                                                 │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-### 7.4 Configuration
+**Placement guidelines:**
+- Minimum separation: 40 mm (better: 60-80 mm)
+- Both antennas on interior surface (body-facing)
+- Avoid placement near metal battery
+- Antenna types: PCB trace antenna or ceramic chip antenna
+- Each antenna should have clear field of view to the body
 
-```toml
-[ban.antenna_diversity]
-# Belt node antenna diversity
-enabled = true
-antenna_count = 2                  # 1 = single, 2 = diversity
-selection_mode = "rssi"            # "rssi" | "packet_loss" | "manual"
-switch_threshold_db = 5            # Switch if other antenna is 5 dB better
-hysteresis_db = 2                  # Don't switch too frequently
-preferred_antenna = "auto"         # "left" | "right" | "auto"
+### 7.5 Antenna Selection Algorithm
 
-# Per-node antenna diversity (if populated on non-belt nodes)
-[nodes.bracelet_left.antenna_diversity]
-enabled = false                    # Option for future variants
-
-[nodes.anklet_left.antenna_diversity]
-enabled = false                    # Option for future variants
+**RSSI-based selection (primary):**
+```
+1. Monitor RSSI on current antenna
+2. If RSSI drops below threshold (-75 dBm):
+   a. Measure RSSI on alternate antenna
+   b. If alternate RSSI > current RSSI + hysteresis (3 dB):
+      Switch to alternate antenna
+   c. Else: Stay on current antenna
+3. Repeat at next connection event
 ```
 
-### 7.5 Why NOT Multi-Radio BLE
+**Packet-loss-triggered selection (fallback):**
+```
+1. Track packet success rate on current antenna
+2. If success rate < 90% over last 10 packets:
+   a. Force switch to alternate antenna
+   b. Reset counters
+   c. Evaluate new antenna
+```
+
+### 7.6 Implementation Details
+
+| Component | Specification | Notes |
+|-----------|---------------|-------|
+| BLE radio | nRF5340 or equivalent | Single transceiver |
+| RF switch | SPDT, < 1 µs switch time | Skyworks SKY13330, Analog ADG918 |
+| Control GPIO | 1-2 pins | From MCU to switch |
+| Antennas | 2× PCB trace or chip | Physically separated |
+| Switch algorithm | RSSI + packet loss | Dual trigger |
+
+### 7.7 Why NOT Multi-Radio BLE
 
 **Multi-radio BLE would mean:** Multiple BLE transceivers on the belt, each managing a subset of nodes.
 
-**Problems with multi-radio BLE:**
+**Problems with multi-radio BLE in wearable form factor:**
 
-| Problem | Description |
-|---------|-------------|
-| Self-interference | Multiple transmitters in close proximity cause receiver desensitization |
-| RF coupling | Antennas centimeters apart couple strongly, degrading sensitivity |
-| Increased power | Multiple radios = multiple power draws |
-| Firmware complexity | Coordinated frequency hopping, scheduling across radios |
-| Debugging difficulty | Multi-radio RF problems are notoriously hard to diagnose |
+| Problem | Description | Severity |
+|---------|-------------|----------|
+| Self-interference | Multiple transmitters in close proximity cause receiver desensitization | High |
+| RF coupling | Antennas centimeters apart couple strongly, degrading sensitivity 10-20 dB | High |
+| Increased power | Multiple radios = 2-5× power consumption | Moderate |
+| Firmware complexity | Coordinated frequency hopping, scheduling across radios | High |
+| Debugging difficulty | Multi-radio RF problems are notoriously hard to diagnose | High |
+| Increased cost | Multiple radio modules, crystals, matching networks | Moderate |
 
 **When multi-radio BLE IS appropriate:**
 - Industrial sensor mesh (factory floor scale)
 - Hospital patient monitoring (ward scale)
 - Smart building (floor-wide deployment)
 - Node count > 20-30
+- Physical antenna separation > 1 meter between radios
 
 **NOT appropriate for SENTINEL-WEAR:** Single-person wearable with 4-6 nodes — the complexity exceeds benefits.
+
+### 7.8 Per-Node Antenna Diversity (Optional)
+
+Antenna diversity can also be implemented on other nodes:
+
+**Bracelet:** Dual antenna (front/back of wrist) — helps with arm rotation effects
+
+**Anklet:** Dual antenna (front/back of ankle) — helps with leg rotation during walking
+
+**Configuration:**
+```toml
+[ban.antenna_diversity]
+# Belt node antenna diversity (primary implementation)
+enabled = true
+antenna_count = 2
+selection_mode = "rssi"            # "rssi" | "packet_loss" | "manual"
+switch_threshold_db = 5            # Switch if other antenna is 5 dB better
+hysteresis_db = 2                  # Prevent rapid switching
+preferred_antenna = "auto"         # "left" | "right" | "auto"
+
+# Per-node antenna diversity (if populated)
+[nodes.bracelet_left.antenna_diversity]
+enabled = false                    # Option for future variants
+
+[nodes.anklet_left.antenna_diversity]
+enabled = false                    # Option for future variants
+```
 
 ---
 
@@ -535,8 +618,18 @@ enabled = false                    # Option for future variants
 | Purpose | Primary companion app connection, media streaming, SLAM data transfer |
 | Antenna | U.FL connector or integrated PCB antenna |
 | Power | 300-500 mW when streaming |
+| Bands | 2.4 GHz and 5 GHz (prefer 5 GHz for RF coexistence) |
 
 **WiFi is present ONLY on the belt node.** No other node has WiFi capability.
+
+**WiFi configuration:**
+```toml
+[connectivity.wifi]
+enabled = true
+prefer_5ghz = true              # Strongly recommended for RF coexistence
+ssid = ""                       # Set at runtime or via config
+password = ""                   # Set at runtime for security
+```
 
 ### 8.2 Cellular / SIM Interface
 
@@ -558,42 +651,18 @@ The belt node PCB includes:
 
 **SIM Interface Signals:**
 
-| Signal | Description |
-|--------|-------------|
-| `SIM_CLK` | SIM card clock |
-| `SIM_DATA` | SIM card data |
-| `SIM_RST` | SIM card reset |
-| `SIM_VCC` | SIM card power (1.8V or 3.0V selectable) |
-| `SIM_DET` | SIM card present detect |
+| Signal | Description | Voltage/Notes |
+|--------|-------------|---------------|
+| `SIM_CLK` | SIM card clock | Generated by cellular module |
+| `SIM_DATA` | SIM card data | Bidirectional |
+| `SIM_RST` | SIM card reset | Active low |
+| `SIM_VCC` | SIM card power | 1.8V or 3.0V selectable |
+| `SIM_DET` | SIM card present detect | GPIO input to MCU |
 
 **Cellular is present ONLY on the belt node.** No other node has cellular capability.
 
-### 8.3 Bluetooth Direct to Companion App
-
-The belt node's BLE radio can connect directly to the companion app when:
-- WiFi is unavailable
-- User prefers BLE-only operation
-- Minimal bandwidth sufficient (alerts, metadata)
-
-**Limitations of BLE direct:**
-- No video streaming
-- No SLAM data transfer
-- Metadata and alerts only
-
-### 8.4 USB-C Interface
-
-- PC companion app connection
-- Firmware update via DFU
-- Charging (USB-C PD preferred)
-- Debug access
-
-### 8.5 Configuration
-
+**Cellular configuration:**
 ```toml
-[connectivity]
-wifi_enabled = true
-wifi_prefer_5ghz = true
-
 [connectivity.cellular]
 enabled = false
 sim_type = "nano_sim"            # "nano_sim" | "esim"
@@ -603,11 +672,49 @@ always_on_cellular = false       # Keep cellular active even with WiFi
 alert_via_cellular = true        # Send critical alerts via cellular
 stream_via_cellular = false      # Stream video over cellular (data cost)
 emergency_contact = ""           # Phone/endpoint for emergency alerts
+```
 
+### 8.3 Bluetooth Direct to Companion App
+
+The belt node's BLE radio can connect directly to the companion app when:
+- WiFi is unavailable
+- User prefers BLE-only operation
+- Minimal bandwidth sufficient (alerts, metadata)
+
+**Limitations of BLE direct:**
+- No video streaming (bandwidth insufficient)
+- No SLAM data transfer
+- Metadata and alerts only
+- Useful for basic system interaction
+
+**BLE direct configuration:**
+```toml
 [connectivity.bluetooth]
 ble_direct_enabled = true        # Allow BLE connection to companion app
 ble_advertising_name = "sentinel-wear"
 ```
+
+### 8.4 USB-C Interface
+
+| Function | Description |
+|----------|-------------|
+| PC companion app | Direct USB connection for desktop app |
+| Firmware update | DFU mode for firmware flashing |
+| Charging | USB-C PD preferred (5-20 V) |
+| Debug | Serial console over USB CDC |
+
+**USB-C is present ONLY on the belt node.**
+
+### 8.5 Connectivity Summary
+
+| Interface | Present On | Purpose |
+|-----------|------------|---------|
+| WiFi | Belt only | Primary app connection |
+| Cellular | Belt only | Remote access, alerts |
+| BLE (to app) | Belt only | Fallback app connection |
+| USB-C | Belt only | PC connection, charging |
+| BLE (BAN) | All nodes | Inter-node communication |
+| UWB (BAN) | Optional per node | High-precision timing/bandwidth |
 
 ---
 
@@ -628,7 +735,7 @@ Standard test interface for all non-belt nodes:
 | 9 | `HAPTIC_TEST` | Haptic actuator test point (AC coupled, LRA resonance) |
 | 10 | `SWD_CLK` | SWD clock |
 | 11 | `SWD_DATA` | SWD data |
-| 12 | `UART_TX` | Debug UART TX |
+| 12 | `UART_TX` | Debug UART TX (115200 baud) |
 
 ### Belt Node Additional Test Pads
 
@@ -640,8 +747,14 @@ Standard test interface for all non-belt nodes:
 | 16 | `CELLULAR_STATUS` | Cellular module status LED / GPIO |
 | 17 | `USB_D+` | USB data plus |
 | 18 | `USB_D-` | USB data minus |
-| 19 | `ANT_DIV_LEFT` | Left BLE antenna signal |
-| 20 | `ANT_DIV_RIGHT` | Right BLE antenna signal |
+| 19 | `ANT_DIV_LEFT` | Left BLE antenna signal (for antenna diversity testing) |
+| 20 | `ANT_DIV_RIGHT` | Right BLE antenna signal (for antenna diversity testing) |
+
+### Test Pad Physical Layout
+
+**Non-belt nodes:** 2×6 array (2 rows × 6 columns), 2.54 mm pitch
+
+**Belt node:** 4×5 array (4 rows × 5 columns), 2.54 mm pitch, with clearly labeled test point IDs
 
 ---
 
@@ -667,27 +780,41 @@ The 360° curved pendant requires additional interface definitions beyond the st
 - Target: < 10 ns skew between any two cameras
 - Without FSYNC: cameras drift at frame rate, causing stitching artifacts
 
+**FSYNC PCB requirements:**
+- Length-matched traces to all camera FSYNC pins
+- Maximum length variation: < 2 mm
+- Series termination resistor (22-33 Ω) near vision processor
+
 ### 10.2 Vision Processor to Belt Node High-Speed Link
 
-| Signal | Description |
+| Signal | Description | Speed |
 |---|---|---|
-| `USB3_TX+` | USB 3.x SuperSpeed TX differential + |
-| `USB3_TX-` | USB 3.x SuperSpeed TX differential - |
-| `USB3_RX+` | USB 3.x SuperSpeed RX differential + |
-| `USB3_RX-` | USB 3.x SuperSpeed RX differential - |
-| `USB3_GND` | USB 3.x ground reference |
+| `USB3_TX+` | USB 3.x SuperSpeed TX differential + | 5 Gbps |
+| `USB3_TX-` | USB 3.x SuperSpeed TX differential - | |
+| `USB3_RX+` | USB 3.x SuperSpeed RX differential + | 5 Gbps |
+| `USB3_RX-` | USB 3.x SuperSpeed RX differential - | |
+| `USB3_GND` | USB 3.x ground reference | |
 
-**Alternative: High-speed SPI or proprietary link for vision processor to belt communication.**
+**Alternative high-speed links:**
+- High-speed SPI (up to 50 MHz) for lower-bandwidth scenarios
+- Proprietary SerDes link for maximum throughput
+- MIPI CSI-2 (if belt node has MIPI receiver)
 
 ### 10.3 Belt Power Input (Extended Runtime)
 
-| Signal | Description |
+| Signal | Description | Current Rating |
 |---|---|---|
-| `V_BELT_IN` | 5V input from belt node battery bank (via necklace cable conductor or separate power cable) |
-| `V_BELT_GND` | Return ground |
-| `V_BELT_EN` | Power enable signal (belt controller controls when to supply power) |
+| `V_BELT_IN` | 5V input from belt node battery bank | Up to 2 A |
+| `V_BELT_GND` | Return ground | |
+| `V_BELT_EN` | Power enable signal (belt controls) | GPIO |
 
 **Enables extended runtime operation where pendant draws power from belt's larger battery.**
+
+**Implementation:**
+- Conductive traces in necklace cable, or
+- Separate thin power cable from belt to pendant
+- Belt controller enables/disables power output
+- Provides unlimited runtime for 360° pendant at full active mode
 
 ### 10.4 Stitching Architecture Options
 
@@ -696,17 +823,39 @@ The 360° curved pendant requires additional interface definitions beyond the st
 - Single encoded stream transmitted to belt
 - Reduces bandwidth requirement on link to belt
 - Requires more compute on pendant
+- Higher pendant power consumption
+- Simpler belt-side processing
 
 **Option B: Belt-side Stitching**
 - All camera streams transmitted individually to belt
 - Belt node stitches 360° panorama
 - Higher bandwidth on link
 - Pendant has simpler compute requirements
+- Distributes compute load to belt
 
 **Option C: Hybrid / Progressive**
-- Low-res stitched baseline from pendant
+- Low-res stitched baseline from pendant (immediate)
 - Higher-res keyframes transmitted progressively
 - Belt accumulates and improves quality over time
+- Graceful degradation and progressive improvement
+
+**Configuration:**
+```toml
+[nodes.pendant_360.stitching]
+mode = "pendant_side"           # "pendant_side" | "belt_side" | "hybrid"
+baseline_resolution = "vga"     # For hybrid mode baseline
+keyframe_resolution = "720p"    # For hybrid mode keyframes
+keyframe_interval_ms = 500     # How often to send high-res keyframes
+```
+
+### 10.5 Camera Coverage Configurations
+
+| Config | Cameras | Angular Spacing | FoV Needed Per Camera | Total Bandwidth (VGA H.264) |
+|--------|---------|-----------------|------------------------|---------------------------|
+| Minimal | 4 | 90° | ≥ 100° | ~1-2 Mbps |
+| Standard | 6 | 60° | ≥ 70° | ~1.5-3 Mbps |
+| Dense | 8 | 45° | ≥ 55° | ~2-4 Mbps |
+| Ultra | 12 | 30° | ≥ 40° | ~3-6 Mbps |
 
 ---
 
@@ -736,7 +885,37 @@ The 360° curved pendant requires additional interface definitions beyond the st
 | `V_CELLULAR` | 3.3V / 4.2V | Buck from main battery | Cellular module |
 | `V_WIFI` | 3.3V | Built into SoM or external | WiFi module |
 
-### 11.4 Node Weight and Battery Targets
+### 11.4 Power Domain Diagram
+
+```
+                    ┌─────────────────────────────────────────┐
+                    │           Power Architecture             │
+                    └─────────────────────────────────────────┘
+                                       │
+           ┌───────────────────────────┼───────────────────────────┐
+           │                           │                           │
+    ┌──────▼──────┐           ┌────────▼────────┐          ┌──────▼──────┐
+    │   VBAT      │           │  USB-C / PoE   │          │ Belt Power  │
+    │ 3.7-4.2V    │           │    5-20V       │          │   Output    │
+    │ (Battery)   │           │  (Belt only)   │          │  (to pendant)│
+    └──────┬──────┘           └────────┬────────┘          └──────┬──────┘
+           │                           │                          │
+           │              ┌────────────┼────────────┐             │
+           │              │            │            │             │
+    ┌──────▼──────┐ ┌──────▼──────┐ ┌──▼───┐ ┌──────▼──────┐      │
+    │   3.3V      │ │   3.3V     │ │1.8V  │ │ 5V Output  │      │
+    │   Buck     │ │   LDO      │ │ LDO  │ │  Enable   │      │
+    │ (MCU/Sensors)│ │(Cellular) │ │(IMU) │ │  (GPIO)   │      │
+    └──────┬──────┘ └────────────┘ └──────┘ └────────────┘      │
+           │                                                   │
+           │                                                   │
+    ┌──────▼───────────────────────────────────────────────────▼──────┐
+    │                    Node Components                              │
+    │  MCU | Sensors | Radio | Haptic | Cameras (if present)         │
+    └──────────────────────────────────────────────────────────────────┘
+```
+
+### 11.5 Node Weight and Battery Targets
 
 | Node | Target Weight (g) | Battery (mAh) | Typical Runtime (Standard Mode) |
 |---|---|---|---|
@@ -756,7 +935,7 @@ The 360° curved pendant requires additional interface definitions beyond the st
 
 *All values are research targets pending test measurement.*
 
-### 11.5 Power Budget Analysis — Belt Node
+### 11.6 Power Budget Analysis — Belt Node
 
 | Mode | Functions Active | Power Draw | Runtime (5000 mAh) |
 |------|------------------|------------|-------------------|
@@ -765,7 +944,7 @@ The 360° curved pendant requires additional interface definitions beyond the st
 | Full Active (Linux) | BAN hub, dense SLAM, 360° stitching, streaming | ~4.5 W | ~4 hours |
 | Remote Streaming | Full Active + cellular | ~5.3 W | ~3.5 hours |
 
-### 11.6 Power Budget Analysis — 360° Pendant
+### 11.7 Power Budget Analysis — 360° Pendant
 
 | Mode | Functions Active | Power Draw | Runtime (800 mAh) |
 |------|------------------|------------|-------------------|
@@ -774,7 +953,31 @@ The 360° curved pendant requires additional interface definitions beyond the st
 | Cameras active, high quality | 8 cameras 720p, stitching | ~4 W | ~0.7 hours |
 | With belt power input | Full active | Unlimited (drawing from belt) | N/A |
 
----
+### 11.8 Charging
+
+| Charging Method | Nodes Supported | Power Source | Typical Charge Time |
+|-----------------|-----------------|--------------|---------------------|
+| USB-C | Belt, Pendant, Bracelet | USB-C charger (5V) | 1-3 hours |
+| Qi Wireless | Anklet, Bracelet | Qi charging pad | 2-4 hours |
+| Magnetic Pogo Pin | Pendant, Bracelet | Docking station | 1-2 hours |
+| Belt Power Input | 360° Pendant (extended runtime) | Conductive chain/cable from belt | N/A (continuous) |
+
+### 11.9 Hot-Swap (Belt Node Variant E)
+
+Dual battery bays with:
+- One battery always powering system
+- Other battery can be swapped without interruption
+- Requires dedicated power path management IC (e.g., TI BQ25895, Analog ADP5100)
+- Charge-while-discharge capability
+- Independent fuel gauges per battery
+
+**Hot-swap configuration:**
+```toml
+[power.hot_swap]
+enabled = false                   # Only for Variant E
+low_battery_swap_threshold = 20  # Alert when battery < 20%
+swap_time_s = 30                 # Time to swap battery
+```
 
 ## 12. Thermal Management
 
@@ -787,6 +990,7 @@ The 360° curved pendant requires additional interface definitions beyond the st
 - MCU (all nodes): 0.1-0.5 W
 - Radios (BLE/UWB): 0.05-0.15 W
 - Cameras (360° pendant): 1-2 W (all 8 active)
+- CW radar (extreme velocity detection): 0.2-0.5 W
 
 ### 12.2 Thermal Mitigation Strategies
 
@@ -820,9 +1024,91 @@ shutdown_threshold_c = 50
 throttle_action = "reduce_slam_rate"  # "reduce_slam_rate" | "reduce_camera_fps" | "disable_slam"
 ```
 
+### 12.4 Thermal Response Under Extreme Velocity Detection
+
+During extreme velocity detection:
+- CW radar draws 0.2-0.5 W continuous (minimal thermal impact)
+- Event camera draws 0.1-0.3 W when active (minimal thermal impact)
+- Haptic burst (piezo): 0.5-1 W for < 100 ms (negligible sustained thermal impact)
+- No special thermal mitigation required for detection events
+
 ---
 
-## 13. Camera Privacy Controls — Available Options
+## 13. Haptic Architecture — Directional and Multi-Modal Alerts
+
+### 13.1 Haptic Actuator Types
+
+| Actuator Type | Onset Time | Power | Suitability |
+|---------------|------------|-------|--------------|
+| ERM (rotating motor) | 10-50 ms | 50-200 mW | ❌ Too slow for extreme velocity |
+| LRA (linear resonant) | 2-10 ms | 30-100 mW | ✅ Sufficient for most scenarios |
+| Piezo haptic | 0.1-1.0 ms | 50-200 mW | ✅ Optimal for extreme velocity |
+| Electrostatic skin stimulator | < 0.1 ms | 10-50 mW | ✅ Experimental, fastest |
+
+### 13.2 Actuator Selection by Scenario
+
+| Scenario | Distance | Flight Time | Recommended Actuator |
+|----------|----------|-------------|----------------------|
+| Rifle at 100+ m | 100-300 m | 117-353 ms | LRA sufficient (2-10 ms onset) |
+| Rifle at 50-100 m | 50-100 m | 59-117 ms | LRA sufficient |
+| Rifle at < 50 m | < 50 m | < 59 ms | Piezo preferred for maximum margin |
+| Handgun at 10+ m | 10+ m | 28+ ms | LRA sufficient |
+| Handgun at 5-10 m | 5-10 m | 14-28 ms | Piezo preferred |
+| Handgun at < 5 m | < 5 m | < 14 ms | Piezo required for any warning |
+
+### 13.3 Directional Haptic Routing
+
+**Principle:** Alert the node closest to the threat direction.
+
+| Threat Direction | Primary Haptic | Secondary Haptic |
+|------------------|-----------------|------------------|
+| Front | Pendant piezo | Both bracelets (light) |
+| Front-left | Left bracelet (strong) | Pendant (light) |
+| Left | Left bracelet (strong) | Left anklet (light) |
+| Rear-left | Left anklet (strong) | Left bracelet (light) |
+| Rear | Both anklets | Both bracelets (light) |
+| Rear-right | Right anklet (strong) | Right bracelet (light) |
+| Right | Right bracelet (strong) | Right anklet (light) |
+| Front-right | Right bracelet (strong) | Pendant (light) |
+
+### 13.4 Belt Node Haptic Configuration
+
+All belt PCBs should include footprint for directional haptic array:
+
+| Actuator Position | Purpose |
+|-------------------|---------|
+| Left side | Alert for left-hemisphere threats |
+| Right side | Alert for right-hemisphere threats |
+| Front | Alert for forward threats |
+| Back | Alert for rear threats |
+
+**Configuration:**
+
+```toml
+[haptic]
+# Primary haptic type
+type = "lra"                      # "lra" | "piezo" | "both"
+
+# Piezo as enhancement (if populated)
+piezo_enabled = false
+piezo_onset_ms = 0.5
+piezo_priority = "extreme_velocity_only"  # Use piezo only for extreme velocity
+
+# LRA configuration
+lra_onset_ms = 5
+lra_pattern_library = true
+
+# Directional haptics
+[haptic.directional]
+enabled = true
+actuator_count = 4
+alert_mode = "nearest_to_threat"
+intensity_gradient = true         # Primary = strong, secondary = light
+```
+
+---
+
+## 14. Camera Privacy Controls — Available Options
 
 All camera privacy controls are user-selected. None are mandatory by the architecture.
 
@@ -867,9 +1153,9 @@ trigger_on_detection = false         # Enable camera on detection event
 
 ---
 
-## 14. Sensing Interfaces
+## 15. Sensing Interfaces
 
-### 14.1 mmWave Radar
+### 15.1 mmWave Radar
 
 | Signal | Direction | Description |
 |---|---|---|
@@ -878,37 +1164,67 @@ trigger_on_detection = false         # Enable camera on detection event
 | `RADAR_IRQ` | Input | Data ready interrupt |
 | `SPI_MOSI/MISO/CLK` | Bidirectional | Shared SPI bus |
 
-**Note on extreme velocity detection:** Standard automotive mmWave profiles support ±18 m/s Doppler. For projectile detection (±300 m/s), radar must be configured in extended Doppler mode with reduced range resolution. TI IWR6843 supports this configuration via custom chirp parameters.
+**Operating modes:**
 
-### 14.2 IMU
+| Mode | Use Case | Latency |
+|------|----------|---------|
+| FMCW (standard) | Presence detection, tracking | 50-200 ms update rate |
+| FMCW (extended Doppler) | Extreme velocity detection | 10-20 ms update rate |
+| CW (continuous wave) | Primary trigger for extreme velocity | 10-100 kHz detection rate |
+
+**Extended Doppler configuration for projectile detection:**
+
+Standard automotive profiles support ±18 m/s. For projectile detection (±300 m/s):
+- Custom chirp configuration required
+- Reduced range resolution acceptable
+- TI IWR6843 supports this via custom chirp parameters
+
+### 15.2 CW Radar Interface (Extreme Velocity Detection)
+
+Dedicated interface for continuous-wave radar mode:
+
+| Signal | Direction | Description |
+|--------|-----------|-------------|
+| `CW_TX_EN` | Output | Enable CW transmission |
+| `CW_IF_OUT` | Input | Intermediate frequency output |
+| `CW_IF_GAIN` | Output | Programmable gain control |
+
+**CW mode advantages for extreme velocity:**
+- No chirp latency
+- Pure Doppler detection
+- 50-150 µs detection time
+- Ideal for Tier 1 reflex trigger
+
+### 15.3 IMU
 
 - I²C (≤ 1 MHz Fast Mode Plus) or SPI (≤ 10 MHz)
 - `IMU_DRDY` interrupt for new-sample wake
 - High dynamic range required for anklets (5-10 g for heel-strike)
 
-### 14.3 Acoustic (Microphone Array)
+### 15.4 Acoustic (Microphone Array)
 
 - I²S or PDM (MCU provides MCLK and BCLK)
 - 3–6 microphones supported (topology per node variant)
 - On-node processing recommended to reduce bandwidth
 
-### 14.4 LiDAR / ToF
+### 15.5 LiDAR / ToF
 
 - UART (common for integrated modules) or SPI
 - `LIDAR_TRIG` for external synchronization with other sensors
 
-### 14.5 Environmental
+### 15.6 Environmental
 
 - I²C, shared bus with IMU
 - Temperature, humidity, pressure, VOC, PM2.5
 
-### 14.6 Event Sensor
+### 15.7 Event Sensor
 
 - MIPI CSI-2 or proprietary SPI-like parallel
 - DMA required for high-bandwidth event rates
 - Used for extreme velocity detection (microsecond latency)
+- **Corrected latency:** 10-100 µs for event generation and transmission (not 1 ms)
 
-### 14.7 Camera
+### 15.8 Camera
 
 - MIPI CSI-2 (standard single camera or 360° array)
 - 100 Ω differential impedance; length-match within 2 mil per pair
@@ -917,9 +1233,9 @@ trigger_on_detection = false         # Enable camera on detection event
 
 ---
 
-## 15. Storage Architecture
+## 16. Storage Architecture
 
-### 15.1 Local Storage Options
+### 16.1 Local Storage Options
 
 | Storage Type | Capacity | Interface | Use Case |
 |--------------|----------|-----------|----------|
@@ -927,7 +1243,7 @@ trigger_on_detection = false         # Enable camera on detection event
 | QSPI NOR Flash | 8-128 MB | QSPI | Metadata, logs, model weights |
 | Internal MCU Flash | 512 KB - 2 MB | Internal | Firmware, critical config |
 
-### 15.2 Belt Node Storage
+### 16.2 Belt Node Storage
 
 | Storage Type | Capacity | Interface | Use Case |
 |--------------|----------|-----------|----------|
@@ -935,7 +1251,18 @@ trigger_on_detection = false         # Enable camera on detection event
 | NVMe SSD | 128 GB - 2 TB | PCIe (x86 variants) | Production deployment |
 | USB storage | Variable | USB 3.x | Backup, archive |
 
-### 15.3 Configuration
+### 16.3 Extreme Velocity Evidence Storage
+
+When extreme velocity is detected:
+
+| Data Type | Storage Location | Retention |
+|-----------|------------------|-----------|
+| Detection timestamp + velocity + direction | Node flash + belt SD | Permanent |
+| Event camera recording | Pendant SD + belt SD | Per retention policy |
+| Conventional camera clip (if present) | Belt SD | Per retention policy |
+| Full characterization log | Belt SD | Permanent with integrity chain |
+
+### 16.4 Configuration
 
 ```toml
 [data]
@@ -948,13 +1275,18 @@ continuous_recording = false
 recording_trigger = "on_detection"  # "always" | "on_detection" | "on_alert" | "manual"
 max_storage_mb = 0               # 0 = unlimited
 include_integrity_chain = true   # SHA-256 hash chain for legal evidence
+
+[data.extreme_velocity]
+store_event_camera_burst = true
+store_trajectory_data = true
+integrity_chain = true
 ```
 
 ---
 
-## 16. Battery Chemistry & Safety
+## 17. Battery Chemistry & Safety
 
-### 16.1 Requirements
+### 17.1 Requirements
 
 All nodes use LiPo cells at 3.7V nominal:
 - UL 1642 or IEC 62133 certified cells required
@@ -963,7 +1295,7 @@ All nodes use LiPo cells at 3.7V nominal:
 - Thermal protection: NTC thermistor, cutoff above 60°C during charge
 - Short-circuit protection: PTC fuse or dedicated protection IC
 
-### 16.2 Charging
+### 17.2 Charging
 
 | Charging Method | Nodes Supported | Power Source |
 |-----------------|-----------------|--------------|
@@ -972,7 +1304,7 @@ All nodes use LiPo cells at 3.7V nominal:
 | Magnetic Pogo Pin | Pendant, Bracelet | Docking station |
 | Belt Power Input | 360° Pendant (extended runtime) | Conductive chain or cable from belt |
 
-### 16.3 Hot-Swap (Belt Node Variant E)
+### 17.3 Hot-Swap (Belt Node Variant E)
 
 Dual battery bays with:
 - One battery always powering system
@@ -981,7 +1313,7 @@ Dual battery bays with:
 
 ---
 
-## 17. Hypoallergenic Material Requirements
+## 18. Hypoallergenic Material Requirements
 
 EN 1811:2011 nickel release compliance for all skin-contact surfaces:
 
@@ -1000,9 +1332,9 @@ EN 1811:2011 nickel release compliance for all skin-contact surfaces:
 
 ---
 
-## 18. Debug Interface
+## 19. Debug Interface
 
-### 18.1 Standard Debug
+### 19.1 Standard Debug
 
 10-pin ARM Cortex Debug Connector (0.05" pitch) or Tag-Connect footprint:
 - `SWDIO`, `SWCLK` — Serial Wire Debug
@@ -1010,13 +1342,13 @@ EN 1811:2011 nickel release compliance for all skin-contact surfaces:
 - `SWO` — Serial Wire Output (printf over SWO)
 - `UART_TX`, `UART_RX` — Console at 115200 baud
 
-### 18.2 Bootloader
+### 19.2 Bootloader
 
 - USB DFU for firmware updates (nodes with USB)
 - ROM bootloader for OTA updates (nodes without USB)
 - Boot mode selection via `MCU_BOOT` test pad
 
-### 18.3 Production Debug Disable
+### 19.3 Production Debug Disable
 
 After production calibration:
 - Debug interface can be permanently disabled via fuse/OTP
@@ -1025,32 +1357,112 @@ After production calibration:
 
 ---
 
-## 19. Extreme Velocity Detection Hardware
+## 20. Extreme Velocity Detection Hardware
 
-### 19.1 Doppler Radar Configuration
+### 20.1 Realistic Engagement Distance Analysis
 
-For production projectile detection (rifle velocity ~850 m/s):
+**Key insight:** Detection range is more important than detection latency for realistic scenarios.
 
-| Requirement | Value |
-|-------------|-------|
-| Doppler velocity range | ±300 m/s or higher |
-| Update rate | ≥ 10,000 Hz (10 kHz) |
-| Latency | < 100 microseconds to detection |
-| Tradeoff | Reduced range resolution acceptable |
+| Category | Distance | Weapons | Flight Time | Warning Time Needed |
+|----------|----------|---------|-------------|---------------------|
+| Point-blank | < 5 m | All | < 15 ms | Physically constrained |
+| Close-range | 5-15 m | Handguns | 15-45 ms | 10-30 ms useful |
+| Medium-range | 15-50 m | All | 45-200 ms | Comfortable margins |
+| Long-range | 50-300 m | Rifles | 60-350 ms | Abundant margins |
 
-**Modules supporting extended Doppler:**
-- TI IWR6843 (with custom chirp configuration)
-- Research needed: Infineon BGT60ATR24C, Acconeer XR112
+### 20.2 Detection Range vs Latency Tradeoff
 
-### 19.2 Event Camera Requirements
+| Configuration | Target Range | Range Resolution | Latency | Use Case |
+|---------------|--------------|------------------|---------|----------|
+| Range-optimized | 150 m | 2 m | 5 ms | Rifle detection at distance |
+| Latency-optimized | 50 m | 0.3 m | 1 ms | Close-range maximum margin |
+| Balanced | 100 m | 0.5 m | 2 ms | General deployment |
 
-| Requirement | Value |
-|-------------|-------|
-| Latency | < 1 millisecond to detection |
-| Resolution | QVGA minimum (higher not required) |
-| Frame rate | Event-based (no fixed frame rate) |
+### 20.3 Tiered Detection Architecture
 
-### 19.3 Firmware Configuration
+**Tier 1 — Reflex Trigger (50-150 µs):**
+
+| Parameter | Value |
+|-----------|-------|
+| Sensor | CW radar (primary) |
+| Processing | Doppler FFT threshold |
+| Output | Binary detection, local haptic trigger |
+| Purpose | Immediate awareness |
+
+**Tier 2 — Direction Validation (100-500 µs):**
+
+| Parameter | Value |
+|-----------|-------|
+| Sensor | Event camera (primary) |
+| Processing | Streak analysis, angle estimation |
+| Output | Velocity vector (magnitude + direction) |
+| Purpose | Directional alert routing |
+
+**Tier 3 — Characterization (5-50 ms):**
+
+| Parameter | Value |
+|-----------|-------|
+| Sensor | FMCW burst + conventional cameras |
+| Processing | Range-Doppler + trajectory |
+| Output | Full threat characterization + evidence |
+| Purpose | Forensic documentation |
+
+### 20.4 Latency Budget — Realistic Scenarios
+
+**Rifle at 100 m:**
+
+| Stage | Latency | Cumulative |
+|-------|---------|------------|
+| Flight time | 117.6 ms | — |
+| Detection (CW radar) | 50-150 µs | ~0.1 ms |
+| BLE transmission (standard) | 0-30 ms | 0.1-30 ms |
+| Haptic onset (LRA) | 2-10 ms | 2.1-40 ms |
+| **Minimum warning** | **77 ms** | |
+| **Maximum warning** | **115 ms** | |
+
+**Conclusion:** Even with worst-case standard BLE + LRA haptics, warning time at 100 m is 77-115 ms — well within human reaction time.
+
+### 20.5 CW Radar Configuration
+
+```toml
+[extreme_velocity.detection]
+# Primary trigger configuration
+mode = "cw"                       # "cw" | "fmcw"
+
+[extreme_velocity.detection.cw]
+fft_size = 64
+fft_window_us = 32
+adc_sample_rate_hz = 2000000
+velocity_resolution_ms = 77
+velocity_threshold_ms = 50
+snr_threshold_db = 10
+
+[extreme_velocity.detection.range]
+# Range optimization priority
+optimization = "balanced"         # "range" | "latency" | "balanced"
+target_range_m = 100
+range_resolution_m = 0.5
+```
+
+### 20.6 Event Camera Integration
+
+**Corrected latency understanding:** Event cameras have 10-100 µs latency for event generation and transmission, not 1 ms.
+
+| Parameter | Value |
+|-----------|-------|
+| Event generation latency | 10-50 µs |
+| Event transmission | 10-50 µs |
+| Streak detection | 50-200 µs |
+| Angle estimation | 50-200 µs |
+| **Total** | **100-500 µs** |
+
+**Event camera on pendant:**
+- Positioned at forward angles for threat direction detection
+- Asynchronous event emission
+- DMA transfer to MCU memory
+- Streak analysis for trajectory estimation
+
+### 20.7 Firmware Configuration
 
 ```toml
 [extreme_velocity]
@@ -1059,36 +1471,27 @@ mode = "production"             # "disabled" | "research" | "production"
 doppler_update_rate_hz = 10000  # High update rate for fast transients
 event_camera_always_on = true
 min_velocity_ms = 50            # Ignore objects below this velocity
-max_detection_distance_m = 10
+max_detection_distance_m = 100  # Detection range target
 alert_on_detection = true
 processing_priority = "realtime" # Preempts other processing
+
+[extreme_velocity.alert]
+# Alert configuration
+haptic_type = "auto"            # "lra" | "piezo" | "auto" (select based on distance)
+directional_routing = true
+nodes = ["pendant", "bracelet_left", "bracelet_right"]
+
+[extreme_velocity.recording]
+trigger_conventional_cameras = true
+capture_duration_s = 2.0
+include_integrity_chain = true
 ```
-
-### 19.4 Latency Budget for Extreme Velocity
-
-| Projectile Type | Engagement Distance | Time to Impact | Detection Budget |
-|-----------------|---------------------|----------------|------------------|
-| Rifle (850 m/s) | 3 m | 3.5 ms | < 1 ms ideal |
-| Handgun (350 m/s) | 3 m | 8.5 ms | < 2 ms ideal |
-
-### 19.5 Latency Breakdown — Optimized Architecture
-
-| Stage | Optimized Latency | How Achieved |
-|-------|-------------------|---------------|
-| Doppler detection | 10-100 µs | Hardware event |
-| Event camera trigger | < 1 ms | Fast transient detection |
-| MCU processing | 100-500 µs | Detection classification |
-| BLE transmission (QoS Critical) | 1-3 ms | Preempts all other traffic |
-| Belt reception | < 1 ms | Processing |
-| Alert decision | 100-500 µs | Classification |
-| Haptic trigger | < 1 ms | Actuator response |
-| **Total optimized** | **~5 ms** | Within rifle engagement window |
 
 ---
 
-## 20. Interface Summary Tables
+## 21. Interface Summary Tables
 
-### 20.1 Node Connectivity Summary
+### 21.1 Node Connectivity Summary
 
 | Node Type | BLE | UWB | WiFi | Cellular | Notes |
 |-----------|-----|-----|------|----------|-------|
@@ -1099,7 +1502,7 @@ processing_priority = "realtime" # Preempts other processing
 | Eyewear | ✅ Mandatory | ⚠️ Optional | ❌ None | ❌ None | BAN to belt only |
 | Belt | ✅ Mandatory | ⚠️ Optional | ✅ Mandatory | ⚠️ Optional | Sole external gateway |
 
-### 20.2 Bandwidth Capability by Transport
+### 21.2 Bandwidth Capability by Transport
 
 | Transport | Max Sustained | Max Burst | Primary Use |
 |-----------|---------------|-----------|-------------|
@@ -1110,9 +1513,19 @@ processing_priority = "realtime" # Preempts other processing
 | LTE Cat 4 | 50-150 Mbps | N/A | Moderate streaming |
 | 5G | 100-1000+ Mbps | N/A | Live 360° streaming |
 
+### 21.3 Extreme Velocity Detection Latency Summary
+
+| Scenario | Distance | Flight Time | Detection + Alert | Warning Time |
+|----------|----------|-------------|-------------------|---------------|
+| Rifle (850 m/s) | 3 m | 3.5 ms | 0.65-2.4 ms (piezo) | 1.1-2.85 ms |
+| Rifle (850 m/s) | 50 m | 58.8 ms | 2.5-11.5 ms (LRA) | 47-56 ms |
+| Rifle (850 m/s) | 100 m | 117.6 ms | 2.5-11.5 ms (LRA) | 106-115 ms |
+| Rifle (850 m/s) | 300 m | 352.9 ms | 2.5-11.5 ms (LRA) | 341-350 ms |
+| Handgun (350 m/s) | 10 m | 28.6 ms | 2.5-11.5 ms (LRA) | 17-26 ms |
+
 ---
 
-## 21. Configuration File Reference
+## 22. Configuration File Reference
 
 Complete configuration example:
 
@@ -1213,6 +1626,17 @@ wifi_prefer_5ghz = true
 ble_wifi_timeshare = false
 ble_gap_during_wifi_ms = 5
 
+[haptic]
+type = "lra"
+piezo_enabled = false
+lra_onset_ms = 5
+
+[haptic.directional]
+enabled = true
+actuator_count = 4
+alert_mode = "nearest_to_threat"
+intensity_gradient = true
+
 [data]
 store_raw_video = true
 store_raw_audio = false
@@ -1223,6 +1647,11 @@ continuous_recording = false
 recording_trigger = "on_detection"
 max_storage_mb = 0
 include_integrity_chain = true
+
+[data.extreme_velocity]
+store_event_camera_burst = true
+store_trajectory_data = true
+integrity_chain = true
 
 [privacy.camera]
 hardware_switch_installed = false
@@ -1244,9 +1673,24 @@ mode = "disabled"
 doppler_update_rate_hz = 10000
 event_camera_always_on = false
 min_velocity_ms = 50
-max_detection_distance_m = 10
+max_detection_distance_m = 100
 alert_on_detection = true
 processing_priority = "realtime"
+
+[extreme_velocity.detection]
+mode = "cw"
+optimization = "balanced"
+target_range_m = 100
+
+[extreme_velocity.alert]
+haptic_type = "auto"
+directional_routing = true
+nodes = ["pendant", "bracelet_left", "bracelet_right"]
+
+[extreme_velocity.recording]
+trigger_conventional_cameras = true
+capture_duration_s = 2.0
+include_integrity_chain = true
 
 [companion_app]
 enabled = true
@@ -1255,7 +1699,3 @@ media_port = 9090
 enable_remote_access = false
 remote_access_token = ""
 ```
-
----
-
-**End of Hardware Configuration Reference**
