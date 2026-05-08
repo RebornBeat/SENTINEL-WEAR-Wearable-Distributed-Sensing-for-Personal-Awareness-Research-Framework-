@@ -3,7 +3,7 @@
 **Project:** SENTINEL-WEAR
 **Node Position:** Neck/chest
 **Primary Role:** Upper-hemisphere sensing, acoustic classification, visual identification (opt-in), 360° world capture (curved variant), extreme velocity detection (event-enhanced variant)
-**Status:** Reference Design v1.0 — Five Variants
+**Status:** Reference Design v1.1 — Five Variants
 **License:** CERN-OHL-S v2
 
 ---
@@ -75,6 +75,22 @@ Belt Node receives stream
 
 **UWB is optional** on all variants (configuration option at assembly).
 
+### 1.5 Antenna Diversity Consideration
+
+For improved BLE reliability in body-shadowing conditions, the pendant PCB may optionally support dual antennas:
+
+- Primary antenna: Forward-facing
+- Secondary antenna: Rear-facing
+
+The MCU selects the antenna with better RSSI dynamically. This is a **configuration option** (antenna population), not a separate hardware variant.
+
+```toml
+[ban.antenna_diversity]
+enabled = false              # Enable dual-antenna switching
+selection_mode = "rssi"      # "rssi" | "packet_loss" | "manual"
+switch_threshold_db = 5      # Switch if other antenna 5 dB better
+```
+
 ---
 
 ## 2. Overview
@@ -86,7 +102,7 @@ The Pendant Node is the highest-information-value wearable node in the SENTINEL-
 - **Acoustic intelligence:** Microphone array for direction-of-arrival and material classification
 - **Visual capture:** Optional cameras (single or 360° array)
 - **Environmental context:** Temperature, humidity, VOC, air quality
-- **Extreme velocity detection:** Optional event cameras for fast transient detection
+- **Extreme velocity detection:** Optional event cameras and extended-Doppler radar for fast transient detection
 
 ### 2.1 Hardware Variants vs Configuration Options
 
@@ -139,6 +155,7 @@ Compact medallion-style pendant with primary sensing capabilities and optional s
 | Battery | 150 / 250 / 300 mAh | Same enclosure, different cell |
 | Microphones | 3 / 4 / 6 element | Same footprint, different population |
 | Event Camera | None / Forward | For extreme velocity detection |
+| Antenna Diversity | Single / Dual | Dual antennas for body-shadowing mitigation |
 
 #### Use Cases
 
@@ -547,11 +564,25 @@ Event cameras are positioned to cover high-probability threat vectors:
 - Standard automotive profiles assume human-scale velocities (±18 m/s)
 - Extended configuration trades range resolution for velocity range
 
+**CW Radar for Primary Trigger:**
+- Continuous Wave mode provides microsecond-latency detection
+- No chirp timing overhead
+- Pure Doppler detection: 50-150 µs detection time
+- Event camera provides trajectory confirmation
+
 **Event Camera Triggering:**
 - Doppler radar detects high-velocity object
 - Event camera captures microsecond-resolution trajectory
 - Fusion algorithm combines Doppler velocity with event camera angular trajectory
 - Detection and alert within < 1 ms
+
+**Latency Budget — Tiered Architecture:**
+
+| Tier | Function | Latency | Sensors |
+|------|----------|---------|---------|
+| 1 — Reflex Trigger | Binary detection, local alert | 50-150 µs | CW radar |
+| 2 — Direction Validation | Velocity vector (magnitude + direction) | 100-500 µs | Event camera |
+| 3 — Characterization | Evidence, trajectory prediction | 5-50 ms | FMCW burst, cameras |
 
 **Use Cases:**
 - Personal protection in high-threat environments
@@ -559,6 +590,30 @@ Event cameras are positioned to cover high-probability threat vectors:
 - Research into wearable threat detection
 
 **Note:** This capability detects fast-moving objects. Physical interception of such objects is explicitly out of scope for SENTINEL-WEAR.
+
+#### Realistic Engagement Scenarios
+
+**Rifle at 100 meters:**
+- Flight time: 117 ms
+- Detection + alert: 0.65-2.4 ms
+- Warning time: **115+ ms** — well within human reaction time
+
+**Rifle at 50 meters:**
+- Flight time: 58 ms
+- Detection + alert: 0.65-2.4 ms
+- Warning time: **56+ ms**
+
+**Handgun at 10 meters:**
+- Flight time: 28 ms
+- Detection + alert: 0.65-2.4 ms
+- Warning time: **26+ ms**
+
+**Close-range (< 5 m):**
+- Flight time: < 15 ms
+- Detection + alert: 0.65-2.4 ms
+- Warning time: **Awareness only** — limited time for response
+
+**Key insight:** For realistic engagement distances (rifle at 50+ m), the system provides substantial warning time. Detection range matters more than microsecond-level latency optimization.
 
 ---
 
@@ -570,11 +625,12 @@ Event cameras are positioned to cover high-probability threat vectors:
 |--------|-----------|-------|-----------|---------------|-------|-------|
 | TI IWR6843ISK-ODS | 60-64 GHz | 15 m | SPI | Standard: ±18 m/s | 200-400 mW | Evaluation module |
 | TI IWR6843 (extended config) | 60-64 GHz | Reduced | SPI | Extended: ±300 m/s | 200-400 mW | Requires custom chirp |
+| TI IWR6843 (CW mode) | 60-64 GHz | N/A (range) | SPI | Extended: ±500 m/s | 150-300 mW | CW mode for Tier 1 detection |
 | Acconeer XR112 | 60 GHz | 10 m | SPI | Configurable | 30-100 mW | Ultra-compact, preferred for wearable |
 | Acconeer XM125 | 60 GHz | 20 m | SPI | Configurable | 50-150 mW | Ultra-long range |
 | Infineon BGT60ATR24C | 60 GHz | 10 m | SPI | Configurable | 100-300 mW | MMIC, custom antenna |
 
-**For extreme velocity detection:** TI IWR6843 with extended Doppler configuration or research into Acconeer XR112 Doppler range.
+**For extreme velocity detection:** TI IWR6843 with extended Doppler configuration or CW mode. Acconeer XR112 for compact wearable applications.
 
 **Antenna orientation:** Forward and lateral hemisphere from chest position. Body absorption significantly attenuates signals facing the torso — outward orientation mandatory.
 
@@ -728,6 +784,13 @@ These options apply to all variants where the PCB design supports the option. Di
 
 **Configuration at assembly:** PCB supports all options; population determines capability.
 
+### 5.5 Antenna Diversity
+
+| Option | PCB Requirement | Notes |
+|--------|-----------------|-------|
+| Single antenna | Primary antenna populated | Standard |
+| Dual antenna | Both antennas populated | Body-shadowing mitigation |
+
 ---
 
 ## 6. Interface Summary
@@ -798,7 +861,7 @@ These options apply to all variants where the PCB design supports the option. Di
 | Rail | Voltage | Source | Usage | Current (typical) |
 |------|---------|--------|-------|-------------------|
 | V_BAT | 3.7-4.2V | LiPo | Raw battery | System total |
-| V_PA | 3.7-4.2V | V_BAT | BLE PA | 10-50 mA |
+| V_PA | 3.7-4.2V | V_BAT | BLE/UWB PA | 10-50 mA |
 | V_SYS | 3.3V | nPM1300 | MCU, sensors | 50-150 mA |
 | V_CAM | 3.3V/2.8V | nPM1300, switched | Camera | 100-400 mA |
 
@@ -1070,12 +1133,14 @@ pendant_node/
 |----------|----------|---------|
 | 360° Pendant Architecture | `docs/theory/360_pendant_architecture.md` | Technical deep-dive |
 | Extreme Velocity Sensing | `docs/theory/extreme_velocity_sensing.md` | Doppler + event camera fusion |
+| Doppler Radar Configuration | `docs/theory/doppler_radar_config.md` | Extended velocity detection |
 | BAN Bandwidth Budget | `docs/theory/ban_bandwidth_budget.md` | BLE/UWB allocation strategies |
 | Power Management | `docs/theory/power_management.md` | Battery and power strategies |
 | Thermal Management | `docs/theory/thermal_management.md` | Wearable thermal design |
 | Hardware Configuration | `hardware/hardware_config.md` | Interface standards, pin maps |
 | Firmware Architecture | `firmware/firmware.md` | Embedded firmware design |
 | Calibration Guide | `docs/guides/calibration_360_pendant.md` | 360° calibration procedure |
+| Deployment Paths | `docs/guides/deployment_paths.md` | Configuration guidance |
 
 ---
 
@@ -1084,8 +1149,4 @@ pendant_node/
 | Version | Date | Changes |
 |---------|------|---------|
 | 1.0 | 2024-01-XX | Initial release |
-| 1.1 | 2024-XX-XX | Added Variant D (Tactical) and Variant E (Event-Enhanced); corrected UWB bandwidth capabilities; added wired internal bus architecture; added tiered progressive quality strategy; expanded thermal management section |
-
----
-
-**End of Document**
+| 1.1 | 2024-XX-XX | Added Variant D (Tactical) and Variant E (Event-Enhanced); corrected UWB bandwidth capabilities; added wired internal bus architecture; added tiered progressive quality strategy; expanded thermal management section; added realistic engagement distance analysis |
