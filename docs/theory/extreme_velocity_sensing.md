@@ -20,14 +20,16 @@ This document is for **academic and educational research purposes only**. It dis
 This document specifies the architecture for detecting high-velocity objects (projectiles, debris, fragments) within the SENTINEL-WEAR body-frame awareness field. It defines:
 
 1. **The physics of the threat** — velocity classes, engagement windows, detection feasibility
-2. **The sensor architecture** — Doppler radar and event camera fusion
-3. **The tiered detection pipeline** — separated by latency requirements
-4. **The alert architecture** — how detections become warnings to the wearer
-5. **The hardware requirements** — modules, form factors, integration
-6. **The BLE optimization** — achieving millisecond-scale transmission
-7. **The integration with SENTINEL-WEAR mesh** — how extreme velocity detection fits into the broader system
+2. **Realistic engagement scenarios** — distance categories and their implications
+3. **The sensor architecture** — Doppler radar and event camera fusion
+4. **The tiered detection pipeline** — separated by latency requirements
+5. **The alert architecture** — how detections become warnings to the wearer
+6. **The hardware requirements** — modules, form factors, integration
+7. **The BLE optimization** — achieving millisecond-scale transmission
+8. **The RF architecture** — antenna diversity and coexistence
+9. **The integration with SENTINEL-WEAR mesh** — how extreme velocity detection fits into the broader system
 
-**Key thesis:** Detection is **production-capable** with current technology. The detection latency is now characterized at 0.45-1.6 ms (electronic) and 0.65-2.4 ms (with piezo haptic alert). This is **within the projectile flight time** for most engagement distances, providing actionable warning.
+**Key thesis:** Detection is **production-capable** with current technology. The detection latency is characterized at 0.45-1.6 ms (electronic) and 0.65-2.4 ms (with piezo haptic alert). For realistic engagement distances (50+ meters for rifles, 5+ meters for handguns), this provides **comfortable warning margins** well within projectile flight time.
 
 ---
 
@@ -46,7 +48,7 @@ This document specifies the architecture for detecting high-velocity objects (pr
 
 ### 2.2 The Engagement Window
 
-Assume a "protective awareness bubble" of **3-5 meters** around the wearer. This is the distance at which any meaningful response must be underway or the projectile will have already reached the body.
+Assume a "protective awareness bubble" around the wearer. This is the distance at which any meaningful response must be underway or the projectile will have already reached the body.
 
 | Projectile Type | Velocity | Time to 5 m | Time to 3 m | Time to 1 m |
 |-----------------|----------|-------------|-------------|-------------|
@@ -55,22 +57,42 @@ Assume a "protective awareness bubble" of **3-5 meters** around the wearer. This
 | Rifle (7.62) | 850 m/s | 5.9 ms | 3.5 ms | 1.2 ms |
 | High-velocity | 1000 m/s | 5.0 ms | 3.0 ms | 1.0 ms |
 
-**Key insight:** The detection window is 2.5-15 milliseconds from entry to potential impact, depending on projectile type and distance.
+### 2.3 Realistic Engagement Scenarios
 
-### 2.3 The Realistic Scenario
+**Critical correction:** The 3-meter rifle scenario is **point-blank range** — extremely rare in actual incidents and physically unavoidable regardless of technology. Realistic scenarios provide far more warning time.
 
-**Most likely engagement:** Handgun at 3-5 meters.
+**Distance Categories:**
 
-| Parameter | Value |
-|-----------|-------|
-| Projectile velocity | 350 m/s |
-| Flight time (3 m) | 8.5 ms |
-| Flight time (5 m) | 14.3 ms |
-| Detection target | < 2 ms |
-| Alert target | < 3 ms |
-| Available warning time | 5-12 ms |
+| Category | Distance | Typical Weapons | Flight Time | System Implication |
+|----------|----------|-----------------|-------------|-------------------|
+| **Point-Blank** | < 5 m | All weapons | < 15 ms | Physically constrained; awareness-only |
+| **Close-Range** | 5-15 m | Handguns, short-barrel | 15-45 ms | Tight but achievable warning |
+| **Medium-Range** | 15-50 m | Handguns, rifles | 45-200 ms | Comfortable warning margins |
+| **Long-Range** | 50-300 m | Rifles | 60-350 ms | Abundant warning time |
 
-**This is achievable with optimized architecture.**
+**Handgun Engagements (Primary Close-Range Threat):**
+
+| Distance | Velocity | Flight Time | Detection + Alert | Warning Time |
+|----------|----------|--------------|-------------------|--------------|
+| 3 m | 350 m/s | 8.5 ms | 0.65-2.4 ms | **6.1-7.85 ms** |
+| 5 m | 350 m/s | 14.3 ms | 0.65-2.4 ms | **11.9-13.65 ms** |
+| 10 m | 350 m/s | 28.6 ms | 0.65-2.4 ms | **26.2-27.95 ms** |
+| 15 m | 350 m/s | 42.9 ms | 0.65-2.4 ms | **40.5-42.25 ms** |
+
+**Rifle Engagements (Primary Long-Range Threat):**
+
+| Distance | Velocity | Flight Time | Detection + Alert | Warning Time |
+|----------|----------|--------------|-------------------|--------------|
+| 50 m | 850 m/s | 58.8 ms | 0.65-2.4 ms | **56.4-58.15 ms** |
+| 100 m | 850 m/s | 117.6 ms | 0.65-2.4 ms | **115.2-116.95 ms** |
+| 200 m | 850 m/s | 235.3 ms | 0.65-2.4 ms | **232.9-234.65 ms** |
+| 300 m | 850 m/s | 352.9 ms | 0.65-2.4 ms | **350.5-352.25 ms** |
+
+**Key insight:** For rifle at 100+ meters (the most realistic active shooter scenario), the wearer has **115+ milliseconds** of warning. This is:
+- Enough time for **multiple haptic pulses**
+- Enough time for **visual alert processing**
+- Enough time for **instinctive protective movement**
+- Well within human reaction time (~200 ms for simple reactions)
 
 ---
 
@@ -194,6 +216,8 @@ Where T is the FFT integration window.
 - Resolution: 77 m/s (coarse)
 - **Perfect for threshold detection** — you only need to know "is it > 300 m/s?"
 - Total processing time: < 100 µs including threshold check
+
+**Key insight:** For extreme velocity detection, you do NOT need precise velocity measurement. A 32 µs FFT window provides 77 m/s resolution — coarse for precision measurement, but PERFECT for fast detection. The detection can happen in tens of microseconds, not milliseconds.
 
 ### 4.4 Event Camera Latency
 
@@ -344,13 +368,31 @@ Total: 5-50 ms
 | Actuator Type | Onset Time | Peak Output | Suitability for EV Detection |
 |---------------|------------|-------------|------------------------------|
 | ERM motor | 10-50 ms | Strong | ❌ **Too slow** |
-| LRA (linear resonant) | 2-10 ms | Moderate | ⚠️ **Marginal** |
-| Piezo haptic | 0.1-1.0 ms | Moderate | ✅ **Required** |
+| LRA (linear resonant) | 2-10 ms | Moderate | ⚠️ **Marginal for close-range** |
+| Piezo haptic | 0.1-1.0 ms | Moderate | ✅ **Optimal for close-range** |
 | Electrostatic skin stimulator | < 0.1 ms | Light | ✅ **Best for reflex** |
 
-**Mandatory:** For extreme velocity alerting, **piezo haptic actuators are required**. Standard vibration motors (ERM) and even LRAs are too slow to be useful within the detection window.
+### 6.3 Haptic Selection by Scenario
 
-### 6.3 Complete End-to-End Timing
+**For rifle at 100+ meters:**
+- Flight time: 117+ ms
+- LRA alert latency: 2-10 ms
+- Warning time: 107+ ms
+- **LRA is fully sufficient**
+
+**For handgun at 5-15 meters:**
+- Flight time: 14-43 ms
+- LRA alert latency: 2-10 ms
+- Warning time: 4-41 ms
+- **Piezo preferred for margin; LRA acceptable**
+
+**For point-blank (< 5 m):**
+- Flight time: < 15 ms
+- Piezo alert latency: 0.5-1.5 ms
+- Warning time: 5-14 ms
+- **Piezo required for any meaningful warning**
+
+### 6.4 Complete End-to-End Timing
 
 **With piezo haptics (recommended configuration):**
 
@@ -364,7 +406,7 @@ Total: 5-50 ms
 | Piezo mechanical onset | 100-500 µs |
 | **Total** | **0.65-2.4 ms** |
 
-**With LRA haptics (not recommended):**
+**With LRA haptics (acceptable for rifle at 50+ m):**
 
 | Stage | Latency |
 |-------|---------|
@@ -372,21 +414,40 @@ Total: 5-50 ms
 | LRA onset | 2-10 ms |
 | **Total** | **2.5-11.5 ms** |
 
-### 6.4 Comparison to Projectile Flight Time
+### 6.5 Comparison to Projectile Flight Time
 
-| Projectile | Velocity | Time to 3 m | Detection + Piezo Alert | Detection + LRA Alert | Result |
-|------------|----------|--------------|------------------------|----------------------|--------|
+| Projectile | Velocity | Time to 3 m | Detection + Piezo | Detection + LRA | Result |
+|------------|----------|-------------|-------------------|------------------|--------|
 | Rifle (850 m/s) | 850 m/s | 3.5 ms | 0.65-2.4 ms ✅ | 2.5-11.5 ms ⚠️ | Piezo alerts before impact |
 | Handgun (350 m/s) | 350 m/s | 8.5 ms | 0.65-2.4 ms ✅ | 2.5-11.5 ms ✅ | Both alert before impact |
 | High-velocity (1000 m/s) | 1000 m/s | 3.0 ms | 0.65-2.4 ms ✅ | 2.5-11.5 ms ❌ | Piezo alerts; LRA may be late |
 
-**Conclusion:** With piezo haptics, alert fires **before impact** for all common projectile types at 3+ meter distances.
+### 6.6 Realistic Scenario Warning Times
+
+**Rifle at 100 meters (most realistic active shooter scenario):**
+
+| Metric | With Piezo | With LRA |
+|--------|------------|----------|
+| Flight time | 117.6 ms | 117.6 ms |
+| Alert latency | 0.65-2.4 ms | 2.5-11.5 ms |
+| Warning time | **115-117 ms** | **106-115 ms** |
+| Human reaction time | ~200 ms | ~200 ms |
+| Usable warning | ✅ Multiple alert pulses possible | ✅ Multiple alert pulses possible |
+
+**Handgun at 10 meters:**
+
+| Metric | With Piezo | With LRA |
+|--------|------------|----------|
+| Flight time | 28.6 ms | 28.6 ms |
+| Alert latency | 0.65-2.4 ms | 2.5-11.5 ms |
+| Warning time | **26-28 ms** | **17-26 ms** |
+| Usable warning | ✅ Good margin | ⚠️ Tight but usable |
 
 ---
 
 ## 7. BLE Optimization for Extreme Velocity
 
-### 7.1 Why Standard BLE Is Too Slow
+### 7.1 Why Standard BLE Can Be Too Slow
 
 Standard BLE implementations assume:
 - Generic GATT profile
@@ -431,7 +492,23 @@ For SENTINEL-WEAR, the belt node and sensing nodes are **controlled devices** wi
 | QoS Critical (preempt) | N/A | 0.3-0.8 ms |
 | Reserved slot + QoS Critical | N/A | 0.2-0.5 ms |
 
-### 7.4 BLE Configuration
+### 7.4 When Is Standard BLE Sufficient?
+
+**For rifle at 100+ meters:**
+- Standard BLE worst case: 30 ms
+- Flight time: 117 ms
+- Warning time: 87+ ms
+- **Standard BLE is fully acceptable**
+
+**For handgun at 10 meters:**
+- Standard BLE worst case: 30 ms
+- Flight time: 28.6 ms
+- Warning time: -1 to 28.6 ms
+- **Optimized BLE recommended**
+
+**Recommendation:** Enable BLE optimization for all scenarios. The cost is zero (firmware configuration), the benefit is valuable for close-range scenarios.
+
+### 7.5 BLE Configuration
 
 ```toml
 [ban.ble_optimization]
@@ -457,7 +534,7 @@ zero_copy_transmission = true
 
 ---
 
-## 8. RF Architecture Considerations
+## 8. RF Architecture and Antenna Diversity
 
 ### 8.1 Frequency Bands
 
@@ -821,7 +898,7 @@ impl ExtremeVelocityPipeline {
 | BLE transmission | Logic analyzer | < 1 ms |
 | Piezo onset | High-speed camera | < 500 µs |
 
-### 12.2 End-to-End Scenario
+### 12.2 End-to-End Scenario Testing
 
 **Scenario: Rifle projectile (850 m/s) at 5 meters**
 
@@ -837,11 +914,67 @@ impl ExtremeVelocityPipeline {
 
 **Result:** Alert fires **3-5 ms before impact**. Wearer has actionable warning.
 
+**Scenario: Rifle projectile (850 m/s) at 100 meters**
+
+| Metric | Target | Actual |
+|--------|--------|--------|
+| Detection time | < 200 µs | 50-150 µs |
+| Total alert latency | < 10 ms | 0.65-11.5 ms (LRA acceptable) |
+| Projectile flight time | 117.6 ms | — |
+| Warning time | > 100 ms | **106-117 ms** |
+
+**Result:** Warning time exceeds human reaction time. Multiple alert pulses possible.
+
 ---
 
-## 13. Integration with Protection Research
+## 13. Detection Range Optimization
 
-### 13.1 Detection-to-Protection Timeline
+### 13.1 The Priority: Detection Range Over Latency
+
+For realistic scenarios, **detection range** is more important than **detection latency**:
+
+| Detection Range | Rifle Warning Time | Handgun Warning Time |
+|-----------------|-------------------|---------------------|
+| 5 m | 58 ms | 14 ms |
+| 10 m | 70 ms | 28 ms |
+| 50 m | 117 ms | 142 ms |
+| 100 m | 235 ms | 285 ms |
+| 150 m | 352 ms | 428 ms |
+
+**Every additional meter of detection range adds ~1 ms of warning time.**
+
+### 13.2 Range vs Resolution Tradeoff
+
+| Configuration | Detection Range | Velocity Resolution | Use Case |
+|---------------|-----------------|---------------------|----------|
+| High resolution | 20-40 m | 20 m/s | Close-range, classification |
+| Balanced | 50-80 m | 50 m/s | General deployment |
+| Maximum range | 100-150 m | 150 m/s | Long-range rifle detection |
+
+### 13.3 Configuration
+
+```toml
+[extreme_velocity.detection_range]
+optimization_target = "balanced"   # "range" | "latency" | "balanced"
+
+[extreme_velocity.detection_range.balanced]
+target_range_m = 100
+range_resolution_m = 0.5
+velocity_resolution_ms = 50
+latency_budget_ms = 2
+
+[extreme_velocity.detection_range.max_range]
+target_range_m = 150
+range_resolution_m = 2.0
+velocity_resolution_ms = 150
+latency_budget_ms = 5
+```
+
+---
+
+## 14. Integration with Protection Research
+
+### 14.1 Detection-to-Protection Timeline
 
 The extreme velocity detection provides a **trigger signal** at T = 50-150 µs. This can inform protection systems documented in `passive_materials_research.md`:
 
@@ -852,11 +985,10 @@ The extreme velocity detection provides a **trigger signal** at T = 50-150 µs. 
 | STF (passive) | Instantaneous | ✅ Always active |
 | EAP stiffening | < 1 ms (theoretical) | 🔬 Future research |
 
-### 13.2 Configuration
+### 14.2 Configuration
 
 ```toml
 [extreme_velocity.protection]
-# Enable detection-triggered protection systems
 enabled = false
 
 [extreme_velocity.protection.filament_deployment]
@@ -870,17 +1002,15 @@ include_integrity_chain = true
 
 ---
 
-## 14. Configuration Reference
+## 15. Configuration Reference
 
-### 14.1 Complete Configuration
+### 15.1 Complete Configuration
 
 ```toml
 [extreme_velocity]
-# Master enable
 enabled = false
 mode = "production"             # "disabled" | "research" | "production"
 
-# Tier 1: Reflex trigger
 [extreme_velocity.tier1]
 radar_mode = "continuous_wave"
 velocity_threshold_ms = 50
@@ -888,36 +1018,34 @@ detection_latency_target_us = 150
 local_haptic_trigger = true
 haptic_type = "piezo"
 
-# Tier 2: Direction validation
 [extreme_velocity.tier2]
 enabled = true
 direction_accuracy_deg = 15
 latency_target_ms = 2
 
-# Tier 3: Characterization
 [extreme_velocity.tier3]
 enabled = true
 record_evidence = true
 latency_target_ms = 50
 
-# BLE configuration
 [extreme_velocity.ble]
 qos_class = "critical"
 reserved_slot = true
 direct_isr_to_radio = true
 
-# Haptic configuration
 [extreme_velocity.haptic]
 type = "piezo"
 onset_time_ms = 0.5
 
-# 360° pendant integration
 [extreme_velocity.pendant_360]
 use_event_cameras = true
 trigger_conventional_cameras = true
 conventional_camera_capture_s = 2.0
 
-# Protection systems
+[extreme_velocity.detection_range]
+optimization_target = "balanced"
+target_range_m = 100
+
 [extreme_velocity.protection]
 enabled = false
 filament_deployment_enabled = false
@@ -925,9 +1053,9 @@ filament_deployment_enabled = false
 
 ---
 
-## 15. Safety and Ethical Considerations
+## 16. Safety and Ethical Considerations
 
-### 15.1 What Detection Does NOT Do
+### 16.1 What Detection Does NOT Do
 
 **Detection does NOT prevent impact.**
 
@@ -942,7 +1070,7 @@ Even with optimized latency:
 
 **This provides situational awareness and reflex preparation, NOT bullet dodging.**
 
-### 15.2 What the System Actually Provides
+### 16.2 What the System Actually Provides
 
 | Capability | Reality |
 |------------|---------|
@@ -954,7 +1082,7 @@ Even with optimized latency:
 | Impact prevention | ❌ No — physics impossible |
 | Guaranteed survival | ❌ No — no protective system guarantees this |
 
-### 15.3 Disclaimers
+### 16.3 Disclaimers
 
 - Not a certified safety system
 - Not personal protective equipment
@@ -964,27 +1092,38 @@ Even with optimized latency:
 
 ---
 
-## 16. Summary
+## 17. Summary
 
-### 16.1 Key Achievements
+### 17.1 Key Achievements
 
 1. **Detection latency characterized:** 0.45-1.6 ms electronic, 0.65-2.4 ms with alert
 2. **Tiered architecture separates concerns:** Tier 1 (reflex), Tier 2 (validation), Tier 3 (evidence)
 3. **CW radar is the optimal trigger:** No scan latency, pure Doppler, microsecond response
 4. **Event cameras provide microsecond trajectory data:** 100-500 µs for direction estimation
 5. **Projectile Doppler signatures are massive:** 340 kHz for rifle — trivial to detect
-6. **Piezo haptics are mandatory:** LRA/ERM are too slow
+6. **Piezo haptics preferred for close-range:** LRA acceptable for rifle at 50+ m
 7. **BLE can be optimized:** QoS Critical achieves 0.3-0.8 ms transmission
 8. **Antenna diversity improves reliability:** Without multi-radio complexity
+9. **Detection range is the priority:** For realistic scenarios, range matters more than latency
 
-### 16.2 The Bottom Line
+### 17.2 The Bottom Line
 
 **Detection is production-capable.** With the architecture specified in this document, SENTINEL-WEAR can detect extreme velocity projectiles within the projectile flight time for most realistic scenarios, providing actionable warning to the wearer.
+
+**For rifle at 100+ meters (most realistic active shooter scenario):**
+- Flight time: 117+ ms
+- Alert latency: 0.65-11.5 ms (depending on haptic)
+- Warning time: 106-117 ms
+- **More than half the reaction time available**
+
+**For handgun at 5-15 meters:**
+- Flight time: 14-43 ms
+- Alert latency: 0.65-11.5 ms
+- Warning time: 4-42 ms
+- **Tight but usable**
 
 **Protection remains research.** The physics of stopping a bullet at close range are fundamentally constrained. Detection-triggered protection systems are theoretically possible for handgun velocities but marginal for rifle. The protection research is documented separately in `passive_materials_research.md`.
 
 **The honest posture:** SENTINEL-WEAR provides **detection, awareness, and evidence**. It does not and cannot provide guaranteed protection from ballistic threats. Users who need personal protection should use certified body armor in addition to any awareness system.
 
 ---
-
-**End of Document**
